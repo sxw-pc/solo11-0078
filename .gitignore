@@ -8,10 +8,12 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
-
 # Generated runs are reproducible from the fixtures and config.
 out/
 charorder-runs/
-
 .DS_Store
 Thumbs.db
+node_modules/
+*.pyc
+.benchmarks/
+.env
