@@ -1,0 +1,196 @@
+{
+  "version": 1,
+  "project": {
+    "name": "销售主数据 · 排序键切换预检",
+    "target": "commerce-core-v2 / utf8mb4 / binary utf8 key",
+    "description": "合成演示：在客户、商品与旧联系人数据切换到新排序键和唯一索引之前，定位归一化碰撞、字节超限、不可见字符、异常空白和解码风险。"
+  },
+  "sources": [
+    {
+      "id": "customers",
+      "type": "csv",
+      "path": "customers.csv",
+      "encoding": "utf-8-sig",
+      "encoding_errors": "replace",
+      "record_id_field": "customer_id",
+      "delimiter": ","
+    },
+    {
+      "id": "products",
+      "type": "jsonl",
+      "path": "products.jsonl",
+      "encoding": "utf-8",
+      "encoding_errors": "replace",
+      "record_id_field": "sku"
+    },
+    {
+      "id": "legacy_contacts",
+      "type": "sqlite",
+      "path": "contacts.sqlite",
+      "encoding": "utf-8",
+      "record_id_field": "contact_id",
+      "table": "contacts"
+    }
+  ],
+  "keys": [
+    {
+      "id": "customer_email_ci",
+      "label": "客户邮箱 · 归一化唯一键",
+      "source": "customers",
+      "columns": [
+        "email"
+      ],
+      "destination": "crm_v2.customer.email_sort_key",
+      "description": "大小写不敏感、宽度折叠后仍需保持唯一的客户邮箱。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "casefold",
+        "width_fold": true,
+        "trim": true,
+        "collapse_whitespace": true,
+        "invisible": "remove"
+      },
+      "unique": true,
+      "required": true,
+      "max_bytes": 64,
+      "max_chars": 96
+    },
+    {
+      "id": "customer_name_ci",
+      "label": "客户名称 · 排序键",
+      "source": "customers",
+      "columns": [
+        "name"
+      ],
+      "destination": "crm_v2.customer.name_sort_key",
+      "description": "展示与检索用的名称排序键，不施加唯一约束。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "casefold",
+        "width_fold": true,
+        "trim": true,
+        "collapse_whitespace": true,
+        "invisible": "remove"
+      },
+      "unique": false,
+      "required": true,
+      "max_bytes": 160,
+      "max_chars": 80
+    },
+    {
+      "id": "customer_company_city_ci",
+      "label": "公司 + 城市 · 复合唯一键",
+      "source": "customers",
+      "columns": [
+        "company",
+        "city"
+      ],
+      "destination": "crm_v2.customer.company_city_key",
+      "description": "演示复合键使用 U+001F 连接并检测跨列碰撞。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "casefold",
+        "width_fold": true,
+        "trim": true,
+        "collapse_whitespace": true,
+        "invisible": "remove"
+      },
+      "unique": true,
+      "required": true,
+      "max_bytes": 120
+    },
+    {
+      "id": "product_sku_unique",
+      "label": "商品 SKU · 宽度/大小写折叠唯一键",
+      "source": "products",
+      "columns": [
+        "sku"
+      ],
+      "destination": "catalog_v2.product.sku_key",
+      "description": "全角与大小写变体折叠后必须保持唯一。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "upper",
+        "width_fold": true,
+        "trim": true,
+        "collapse_whitespace": false,
+        "invisible": "remove"
+      },
+      "unique": true,
+      "required": true,
+      "max_bytes": 32
+    },
+    {
+      "id": "product_title_sort",
+      "label": "商品标题 · 排序键",
+      "source": "products",
+      "columns": [
+        "title"
+      ],
+      "destination": "catalog_v2.product.title_sort_key",
+      "description": "保留不可见字符用于风险展示，但生成稳定排序键。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "casefold",
+        "width_fold": true,
+        "trim": true,
+        "collapse_whitespace": true,
+        "invisible": "keep"
+      },
+      "unique": false,
+      "required": false,
+      "max_bytes": 64,
+      "max_chars": 64
+    },
+    {
+      "id": "contact_email_ci",
+      "label": "联系人邮箱 · 归一化唯一键",
+      "source": "legacy_contacts",
+      "columns": [
+        "email"
+      ],
+      "destination": "contact_v2.contact.email_key",
+      "description": "旧联系人的邮箱唯一候选键。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "casefold",
+        "width_fold": true,
+        "trim": true,
+        "collapse_whitespace": true,
+        "invisible": "remove"
+      },
+      "unique": true,
+      "required": true,
+      "max_bytes": 64
+    },
+    {
+      "id": "contact_name_company_ci",
+      "label": "姓名 + 公司 · 复合唯一键",
+      "source": "legacy_contacts",
+      "columns": [
+        "full_name",
+        "company"
+      ],
+      "destination": "contact_v2.contact.name_company_key",
+      "description": "复合键碰撞演示。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "casefold",
+        "width_fold": true,
+        "trim": true,
+        "collapse_whitespace": true,
+        "invisible": "remove"
+      },
+      "unique": true,
+      "required": true,
+      "max_bytes": 120
+    }
+  ],
+  "severity_overrides": {
+    "MOJIBAKE_SUSPECT": "medium",
+    "ABNORMAL_WHITESPACE": "low"
+  },
+  "reports": {
+    "max_report_rows": 500
+  }
+}

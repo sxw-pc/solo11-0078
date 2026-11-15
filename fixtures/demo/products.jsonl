@@ -1,0 +1,13 @@
+{"category":"kitchen","description":"Ceramic 300ml","sku":"SKU-001","title":"Caf\u00e9 Mug"}
+{"category":"kitchen","description":"lowercase duplicate SKU","sku":"sku-001","title":"Cafe\u0301 Mug"}
+{"category":"home","description":"half-width kana","sku":"SKU-003","title":"\uff76\uff80\uff76\uff85 \uff8f\uff78\uff9e"}
+{"category":"home","description":"full-width kana","sku":"SKU-004","title":"\u30ab\u30bf\u30ab\u30ca \u30de\u30b0"}
+{"category":"stationery","description":"soft hyphen remains visible","sku":"SKU-005","title":"Soft\u00adhyphen"}
+{"category":"promo","description":"long key","sku":"SKU-006","title":"Extra long product title with many descriptive words that should exceed the target key budget"}
+{"category":"ops","description":"full-width SKU","sku":"\uff33\uff2b\uff35\uff0d\uff10\uff10\uff17","title":"\uff26\uff55\uff4c\uff4c\uff57\uff49\uff44\uff54\uff48 SKU"}
+{"category":"ops","description":"duplicate fullwidth","sku":"SKU-007","title":"Fullwidth SKU"}
+{"category":"security","description":"bidi control","sku":"SKU-008","title":"Safe \u202egnp.exe"}
+{"category":"home","description":"mojibake without auto-fix","sku":"SKU-009","title":"M\u00c3\u00bcller Mug"}
+{"category":"ops","description":"bad ÿ byte","sku":"SKU-010","title":"Control\u0007Bell"}
+{"category":"ops","description":"literal replacement character","sku":"SKU-011","title":"Replacement \ufffd in title"}
+{"category":"unknown","description":"record id intentionally absent","title":"Missing SKU"}

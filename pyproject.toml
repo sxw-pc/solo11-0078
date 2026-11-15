@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "charorder"
+version = "1.0.0"
+description = "字序迁核台：文本编码、Unicode 规范化与目标排序键的离线迁移预检工具"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "charorder" }]
+keywords = ["unicode", "normalization", "collation", "migration", "audit", "offline"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Text Processing :: Linguistic",
+    "Topic :: Database",
+]
+dependencies = []
+
+[project.scripts]
+charorder = "charorder.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["charorder*"]
+
+[tool.setuptools]
+zip-safe = false

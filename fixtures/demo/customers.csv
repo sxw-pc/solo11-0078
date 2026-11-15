@@ -1,0 +1,12 @@
+﻿"customer_id","name","email","company","city","notes"
+"C-1001","José Álvarez","Jose@Example.com","Acme  Ltd","Madrid","VIP"
+"C-1002","José Álvarez","jose@example.com","Acme Ltd","Madrid","vip"
+"C-1003","ＡＢＣ　Ｃｏｍｐａｎｙ","ops@example.com","ABC Company","Tokyo","renewal soon"
+"C-1004","ABC Company","OPS@example.com","ABC Company","Tokyo","renewal soon"
+"C-1005","李​雷","li.lei@example.com","蓝海科技","Shanghai","line1
+line2"
+"C-1006","李雷","li.lei@example.com","蓝海科技","Shanghai","duplicate"
+"C-1007","Zoë O'Brien","zoe.obrien+enterprise-account-with-a-very-long-tag@example-corporation.com","Zeta Works","London","safe ‮gnp.exe"
+"C-1008","Ｚｏｅ̈　Ｏ'Ｂｒｉｅｎ","ｚｏｅ．ｏｂｒｉｅｎ＋ｅｎｔｅｒｐｒｉｓｅ－ａｃｃｏｕｎｔ－ｗｉｔｈ－ａ－ｖｅｒｙ－ｌｏｎｇ－ｔａｇ＠ｅｘａｍｐｌｅ－ｃｏｒｐｏｒａｔｉｏｎ．ｃｏｍ","Zeta Works","London","mirror"
+"C-1009","Ravi Kapoor","","Delta LLP","Mumbai","no email"
+"C-1010","Nina Petrova","nina@example.org","Echo Inc","Berlin","decoded � byte"
