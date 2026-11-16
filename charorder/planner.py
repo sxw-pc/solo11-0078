@@ -25,14 +25,29 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
     blocking_codes = Counter(finding.code for finding in high_findings)
     rule_stats = {item["rule_id"]: item for item in summary["rules"]}
 
+    target_indexes = getattr(result, "target_rehearsals", [])
+    target_blocked_indexes = [
+        rehearsal.spec.id for rehearsal in target_indexes if rehearsal.blocked
+    ]
+    target_blocking_codes = Counter(
+        finding.code
+        for finding in high_findings
+        if finding.code.startswith("TARGET_")
+    )
+    blocked_rule_ids: set[str] = set()
+    for rehearsal in target_indexes:
+        if rehearsal.blocked:
+            blocked_rule_ids.update(rehearsal.spec.rule_ids)
+
     rules: list[dict[str, Any]] = []
     for rule in config.keys:
         stats = rule_stats[rule.id]
         rule_high = stats["findings_by_severity"].get("high", 0)
         rule_medium = stats["findings_by_severity"].get("medium", 0)
+        target_blocked = rule.id in blocked_rule_ids
         if stats["records"] == 0:
             status = "no_records"
-        elif rule_high:
+        elif rule_high or target_blocked:
             status = "blocked"
         elif rule_medium:
             status = "review"
@@ -59,12 +74,14 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 "collision_records": stats["collision_records"],
                 "overlength": stats["overlength"],
                 "findings_by_severity": stats["findings_by_severity"],
+                "target_index_blocked": target_blocked,
                 "blocking_codes": sorted(
                     {
                         finding.code
                         for finding in high_findings
                         if finding.rule_id == rule.id
                     }
+                    | (set(target_blocking_codes) if target_blocked else set())
                 ),
             }
         )
@@ -159,57 +176,100 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "evidence": ["collisions.json"],
             "examples": collision_steps,
         },
-        {
-            "order": 5,
-            "phase": "hygiene",
-            "title": "处理不可见字符与异常空白",
-            "status": "review" if medium else "ready",
-            "detail": (
-                "按检查码汇总不可见格式符、双向控制符、控制字符、异常空白和疑似乱码；"
-                "任何清理必须回到源系统变更流程，不能只改目标键。"
-            ),
-            "acceptance": "每条中等级发现均有豁免或源数据修复记录；豁免需写明理由与到期日。",
-            "counts": {
-                code: count
-                for code, count in summary["findings_by_code"].items()
-                if code
-                in {
-                    "INVISIBLE_CHARACTER",
-                    "BIDI_CONTROL",
-                    "CONTROL_CHARACTER",
-                    "ABNORMAL_WHITESPACE",
-                    "MOJIBAKE_SUSPECT",
-                }
-            },
-        },
-        {
-            "order": 6,
-            "phase": "shadow",
-            "title": "在影子库生成排序键并做旧新对比",
-            "status": "pending" if any_blocking else "ready",
-            "detail": (
-                "本工具不执行任何 UPDATE/INSERT/DELETE。"
-                "在独立影子环境按目标键重建索引，对旧排序与新排序做逐键抽样比对，"
-                "记录排序迁移造成的顺序变化。"
-            ),
-            "acceptance": "影子库键总数与预检一致；唯一索引创建成功；抽样对比无未解释差异。",
-        },
-        {
-            "order": 7,
-            "phase": "cutover",
-            "title": "按门禁复跑并放行切换",
-            "status": "pending",
-            "detail": (
-                "使用同一配置复跑并启用 --fail-on high。"
-                "只有碰撞组为 0、高等级发现为 0、输入哈希未变化时才允许切换。"
-            ),
-            "acceptance": (
-                "复跑命令退出码为 0；manifest.json 校验通过；"
-                "碰撞组 0；所有必需键非空。"
-            ),
-            "evidence": ["manifest.json", "report.html"],
-        },
     ]
+
+    if target_indexes:
+        target_collision_groups = sum(
+            len(rehearsal.groups) for rehearsal in target_indexes
+        )
+        target_collision_records = sum(
+            len(group.participants)
+            for rehearsal in target_indexes
+            for group in rehearsal.groups
+        )
+        target_projected_rows = sum(
+            rehearsal.projected_row_count for rehearsal in target_indexes
+        )
+        steps.append(
+            {
+                "order": 5,
+                "phase": "target_indexes",
+                "title": "目标唯一索引离线演练与跨来源裁决门禁",
+                "status": "blocked" if target_blocked_indexes else "ready",
+                "detail": (
+                    f"对 {len(target_indexes)} 个目标唯一索引在同一投影视图中复核："
+                    f"发现 {target_collision_groups} 个跨来源碰撞组、"
+                    f"{target_collision_records} 条受影响记录，"
+                    f"投影目标行 {target_projected_rows} 行；"
+                    f"阻断索引 {len(target_blocked_indexes)} 个。"
+                    "merge 裁决收敛为单目标行并保留全部归属证据，"
+                    "split 裁决为每个实体分配可验证替代键；"
+                    "无裁决、失效裁决、重复占用或替代键二次碰撞/超长一律阻断。"
+                ),
+                "acceptance": (
+                    "每个碰撞组均有与本次输入和规则摘要绑定的有效裁决；"
+                    "完整目标投影内键唯一且满足字节/字符长度约束。"
+                ),
+                "evidence": ["target_indexes.json", "ledger.sqlite"],
+                "blocked_indexes": list(target_blocked_indexes),
+                "blocking_codes": dict(sorted(target_blocking_codes.items())),
+            }
+        )
+
+    steps.extend(
+        [
+            {
+                "order": len(steps) + 1,
+                "phase": "hygiene",
+                "title": "处理不可见字符与异常空白",
+                "status": "review" if medium else "ready",
+                "detail": (
+                    "按检查码汇总不可见格式符、双向控制符、控制字符、异常空白和疑似乱码；"
+                    "任何清理必须回到源系统变更流程，不能只改目标键。"
+                ),
+                "acceptance": "每条中等级发现均有豁免或源数据修复记录；豁免需写明理由与到期日。",
+                "counts": {
+                    code: count
+                    for code, count in summary["findings_by_code"].items()
+                    if code
+                    in {
+                        "INVISIBLE_CHARACTER",
+                        "BIDI_CONTROL",
+                        "CONTROL_CHARACTER",
+                        "ABNORMAL_WHITESPACE",
+                        "MOJIBAKE_SUSPECT",
+                    }
+                },
+            },
+            {
+                "order": len(steps) + 2,
+                "phase": "shadow",
+                "title": "在影子库生成排序键并做旧新对比",
+                "status": "pending" if any_blocking else "ready",
+                "detail": (
+                    "本工具不执行任何 UPDATE/INSERT/DELETE。"
+                    "在独立影子环境按目标键重建索引，对旧排序与新排序做逐键抽样比对，"
+                    "记录排序迁移造成的顺序变化。"
+                ),
+                "acceptance": "影子库键总数与预检一致；唯一索引创建成功；抽样对比无未解释差异。",
+            },
+            {
+                "order": len(steps) + 3,
+                "phase": "cutover",
+                "title": "按门禁复跑并放行切换",
+                "status": "pending",
+                "detail": (
+                    "使用同一配置复跑并启用 --fail-on high。"
+                    "只有碰撞组为 0、高等级发现为 0、输入哈希未变化时才允许切换。"
+                ),
+                "acceptance": (
+                    "复跑命令退出码为 0；manifest.json 校验通过；"
+                    "碰撞组 0；所有必需键非空。"
+                ),
+                "evidence": ["manifest.json", "report.html"],
+            },
+        ]
+    )
 
     return {
         "schema_version": 1,
@@ -227,7 +287,14 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "fail_on": "high",
             "blocking_findings": high,
             "collision_groups": summary["collision_groups"],
-            "passes": high == 0 and summary["collision_groups"] == 0,
+            "target_indexes_configured": len(target_indexes),
+            "target_indexes_blocked": len(target_blocked_indexes),
+            "target_blocking_codes": dict(sorted(target_blocking_codes.items())),
+            "passes": (
+                high == 0
+                and summary["collision_groups"] == 0
+                and not target_blocked_indexes
+            ),
         },
         "summary": {
             "source_count": summary["source_count"],
@@ -265,12 +332,14 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
         ],
         "sources_with_issues": source_invalid,
         "rules": rules,
+        "target_indexes": [rehearsal.to_dict() for rehearsal in target_indexes],
         "steps": steps,
         "forbidden_actions": [
             "不得由本工具自动合并、删除或改写碰撞记录",
             "不得自动“修复”疑似乱码而覆盖原值",
             "不得把校验失败的目标键直接写入生产唯一索引",
             "不得将源文件或 SQLite 台账当作可回写数据源",
+            "不得在缺少有效裁决或裁决过期时放行目标唯一索引",
         ],
         "reproduce": {
             "config_file": config.config_path.name,

@@ -24,6 +24,7 @@ ARTIFACT_FILES = (
     "plan.md",
     "findings.json",
     "collisions.json",
+    "target_indexes.json",
     "keys.jsonl",
     "ledger.sqlite",
     "manifest.json",
@@ -76,12 +77,34 @@ def write_artifacts(
         },
         "collisions": [group.to_dict() for group in result.collisions],
     }
+    target_indexes_doc = {
+        "schema_version": 1,
+        "kind": "charorder.target_index_rehearsals",
+        "run_id": result.run_id,
+        "counts": {
+            "indexes": len(result.target_rehearsals),
+            "blocked_indexes": sum(
+                1 for rehearsal in result.target_rehearsals if rehearsal.blocked
+            ),
+            "collision_groups": sum(
+                len(rehearsal.groups) for rehearsal in result.target_rehearsals
+            ),
+            "projected_rows": sum(
+                rehearsal.projected_row_count
+                for rehearsal in result.target_rehearsals
+            ),
+        },
+        "target_indexes": [
+            rehearsal.to_dict() for rehearsal in result.target_rehearsals
+        ],
+    }
 
     artifacts: dict[str, bytes] = {
         "plan.json": plan_bytes,
         "plan.md": render_plan_markdown(result).encode("utf-8"),
         "findings.json": _json_bytes(findings_doc),
         "collisions.json": _json_bytes(collisions_doc),
+        "target_indexes.json": _json_bytes(target_indexes_doc),
         "keys.jsonl": _jsonl_bytes(item.to_dict() for item in result.key_results),
         "report.md": render_markdown(result).encode("utf-8"),
         "report.html": render_html(result).encode("utf-8"),

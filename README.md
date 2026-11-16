@@ -231,6 +231,32 @@ charorder/
 
 复合键固定使用 ASCII Unit Separator `U+001F`。若某个变换后的分量本身包含该字符，会生成高等级 `COMPOSITE_SEPARATOR` 风险，避免静默产生歧义键。
 
+### 5.5 目标唯一索引离线演练与跨来源裁决
+
+两个旧系统的客户号各自唯一，但合并进同一个目标唯一索引后仍可能撞键。逐规则的 `(rule_id, target_key)` 碰撞组无法表达“不同来源规则指向同一目标 destination”的裁决，因此可在配置中显式声明**目标索引组**，把多个来源的键规则纳入同一个目标唯一索引：
+
+```json
+"target_indexes": [
+  {
+    "id": "ux_identity_email",
+    "label": "客户身份邮箱唯一索引",
+    "destination": "crm_v2.identity.email_key",
+    "rules": ["email_a", "email_b"],
+    "max_bytes": 64,
+    "max_chars": 96
+  }
+]
+```
+
+- 组内规则必须来自至少两个不同来源，且声明的 `destination` 与索引 destination 一致（或留空由索引承载）。
+- 演练在**同一投影视图**内对全部受影响目标键重新核对唯一性与 UTF-8 字节 / 字符长度，不允许只局部移除旧碰撞而留下新碰撞。
+- 跨来源相同目标键会生成 `TARGET_INDEX_COLLISION`。报告保留每个参与者的来源记录身份、原始分量、规则声明目标键（含字节键）与规则来源摘要；原文相同但因不同 Unicode 变换得到不同目标键的记录不会被误合并。
+- 审核人员在离线裁决台账（`adjudications` 引用的 JSON，`kind=charorder.target_adjudications`）中逐组给出两种合法路线，裁决与本次输入 SHA-256、配置 SHA-256 及规则摘要（rule digest）绑定：
+  - **merge（可信同实体）**：收敛为一个目标身份（投影中一行），并保留全部来源 → 目标归属证据；
+  - **split（确为不同实体）**：为每个实体选择可验证、满足目标字节长度约束的替代键，投影中保留为多行且键不同。
+- 下列情形目标索引一律阻断（高等级检查码），不会因为原规则单独 `ready` 而放行：无裁决（`TARGET_ADJUDICATION_MISSING`）、裁决引用不存在或重复的来源身份 / 规则摘要不匹配（`TARGET_ADJUDICATION_INVALID`）、裁决过期或与本次输入 / 配置绑定不一致（`TARGET_ADJUDICATION_STALE`）、同一旧记录被两组矛盾裁决占用（`TARGET_ADJUDICATION_CONFLICT`）、替代键在投影中二次碰撞（`TARGET_REPLACEMENT_COLLISION`）、替代键超长（`TARGET_REPLACEMENT_OVERLENGTH`），以及投影级重复 / 超长（`TARGET_PROJECTION_DUPLICATE` / `TARGET_PROJECTION_OVERLENGTH`）。
+- 演练完全离线、只读来源，不写回任何 CSV / JSONL / SQLite，也不执行任何建索引或数据改写语句。未配置 `target_indexes` 时，逐规则碰撞与计划行为保持不变。
+
 ---
 
 ## 6. 输出产物
@@ -245,8 +271,9 @@ charorder/
 | `plan.md` | 迁移计划的人类可读版本 |
 | `findings.json` | 全量风险清单、严重级别和检查码计数 |
 | `collisions.json` | 全量碰撞组及参与者 |
+| `target_indexes.json` | 目标唯一索引离线演练：跨来源碰撞组、裁决结果、完整目标投影与阻断原因 |
 | `keys.jsonl` | 每条记录 × 每条规则的原始值、目标键、转义值、字节数、哈希、缺陷与碰撞组 ID |
-| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members 及视图） |
+| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members / target_indexes / target_collisions / target_collision_members / target_projection / adjudications 及视图） |
 | `manifest.json` | 运行清单：产物哈希、计划哈希、源指纹、复跑命令 |
 
 默认输出目录为 `charorder-runs/<run-id>/`；显式传入 `--out` 可指定位置。目录非空时默认拒绝写入，需用 `--force` 覆盖已知产物名。工具不会清理目录中的未知文件。
@@ -294,6 +321,15 @@ WHERE m.group_id = 'C-...';
 | `COMPOSITE_SEPARATOR` | high | 变换后的分量含保留分隔符 `U+001F` |
 | `NORMALIZATION_COLLISION` | high | 不同原始值经变换后落入同一唯一键 |
 | `DUPLICATE_KEY` | high | 原始值本身相同，仍形成唯一键重复 |
+| `TARGET_INDEX_COLLISION` | high | 目标唯一索引内跨来源记录映射到同一目标键 |
+| `TARGET_ADJUDICATION_MISSING` | high | 目标索引碰撞组缺少人工裁决 |
+| `TARGET_ADJUDICATION_INVALID` | high | 裁决引用不存在 / 重复身份，或规则摘要、原始值、目标键绑定不匹配 |
+| `TARGET_ADJUDICATION_STALE` | high | 裁决已过期，或与本次配置 / 输入哈希绑定不一致 |
+| `TARGET_ADJUDICATION_CONFLICT` | high | 同一来源记录被两个矛盾裁决重复占用 |
+| `TARGET_REPLACEMENT_COLLISION` | high | split 替代键在完整目标投影中再次撞键 |
+| `TARGET_REPLACEMENT_OVERLENGTH` | high | split 替代键超出目标字节 / 字符长度约束 |
+| `TARGET_PROJECTION_DUPLICATE` | high | 完整目标投影仍存在重复键 |
+| `TARGET_PROJECTION_OVERLENGTH` | high | 完整目标投影中的键超出索引长度约束 |
 
 可在配置的 `severity_overrides` 中逐项覆盖。
 

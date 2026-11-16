@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .adjudications import load_adjudication_file
 from .errors import ConfigError
 from .models import (
     DEFAULT_SEVERITIES,
@@ -18,11 +19,21 @@ from .models import (
     KeyRule,
     ProjectSpec,
     SourceSpec,
+    TargetIndexSpec,
     TransformSpec,
 )
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_TOP_LEVEL = {"version", "project", "sources", "keys", "severity_overrides", "reports"}
+_TOP_LEVEL = {
+    "version",
+    "project",
+    "sources",
+    "keys",
+    "severity_overrides",
+    "reports",
+    "target_indexes",
+    "adjudications",
+}
 _PROJECT_FIELDS = {"name", "target", "description"}
 _SOURCE_FIELDS = {
     "id",
@@ -57,6 +68,16 @@ _TRANSFORM_FIELDS = {
     "invisible",
 }
 _REPORT_FIELDS = {"max_report_rows"}
+_TARGET_INDEX_FIELDS = {
+    "id",
+    "label",
+    "destination",
+    "rules",
+    "max_bytes",
+    "max_chars",
+    "description",
+}
+_ADJUDICATION_FIELDS = {"index_id", "path"}
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -157,6 +178,11 @@ def load_config(path: str | Path) -> AppConfig:
     ):
         raise ConfigError("reports.max_report_rows 必须是 1..100000 的整数。")
 
+    target_indexes = _parse_target_indexes(data.get("target_indexes", []), keys)
+    adjudication_docs = _parse_adjudications(
+        data.get("adjudications", []), config_path.parent, target_indexes
+    )
+
     return AppConfig(
         version=1,
         project=project,
@@ -166,7 +192,105 @@ def load_config(path: str | Path) -> AppConfig:
         config_sha256=hashlib.sha256(raw).hexdigest(),
         severity_overrides=severity_overrides,
         max_report_rows=max_report_rows,
+        target_indexes=tuple(target_indexes),
+        adjudications=tuple(adjudication_docs),
     )
+
+
+def _parse_target_indexes(item: Any, keys: list[KeyRule]) -> list[TargetIndexSpec]:
+    if item is None:
+        item = []
+    if not isinstance(item, list):
+        raise ConfigError("target_indexes 必须是数组。")
+    indexes: list[TargetIndexSpec] = []
+    seen_index_ids: set[str] = set()
+    key_by_id = {key.id: key for key in keys}
+    for index_pos, entry in enumerate(item):
+        where = f"target_indexes[{index_pos}]"
+        obj = _require_object(entry, where)
+        _reject_unknown(obj, _TARGET_INDEX_FIELDS, where)
+        index_id = _require_id(obj.get("id"), f"{where}.id")
+        if index_id in seen_index_ids:
+            raise ConfigError(f"{where}.id 重复：{index_id}")
+        seen_index_ids.add(index_id)
+        label = _require_nonempty_str(obj.get("label"), f"{where}.label")
+        destination = _require_nonempty_str(
+            obj.get("destination"), f"{where}.destination"
+        )
+        rules_obj = obj.get("rules")
+        if not isinstance(rules_obj, list) or not rules_obj:
+            raise ConfigError(f"{where}.rules 必须是非空字符串数组。")
+        rule_ids: list[str] = []
+        seen_rule_ids: set[str] = set()
+        for rule_pos, rule_ref in enumerate(rules_obj):
+            rule_id = _require_id(rule_ref, f"{where}.rules[{rule_pos}]")
+            if rule_id not in key_by_id:
+                raise ConfigError(
+                    f"{where}.rules[{rule_pos}] 指向不存在的键规则：{rule_id}"
+                )
+            if rule_id in seen_rule_ids:
+                raise ConfigError(f"{where}.rules 含重复规则：{rule_id}")
+            seen_rule_ids.add(rule_id)
+            rule = key_by_id[rule_id]
+            if rule.destination and rule.destination != destination:
+                raise ConfigError(
+                    f"{where}.destination 为 {destination}，"
+                    f"但规则 {rule_id} 已声明 destination={rule.destination}；"
+                    "同一目标唯一索引内的规则必须指向同一目标 destination。"
+                )
+            rule_ids.append(rule_id)
+        if len({key_by_id[rule_id].source_id for rule_id in rule_ids}) < 2:
+            raise ConfigError(
+                f"{where}.rules 必须显式纳入至少两个不同来源的键规则，"
+                "目标索引演练用于跨来源裁决；单来源碰撞请使用逐规则唯一键检查。"
+            )
+        max_bytes = _optional_positive_int(obj.get("max_bytes"), f"{where}.max_bytes")
+        max_chars = _optional_positive_int(obj.get("max_chars"), f"{where}.max_chars")
+        description = _optional_str(obj.get("description", ""), f"{where}.description")
+        indexes.append(
+            TargetIndexSpec(
+                id=index_id,
+                label=label,
+                destination=destination,
+                rule_ids=tuple(rule_ids),
+                max_bytes=max_bytes,
+                max_chars=max_chars,
+                description=description,
+            )
+        )
+    return indexes
+
+
+def _parse_adjudications(
+    item: Any, base_dir: Path, target_indexes: list[TargetIndexSpec]
+) -> list:
+    if item is None:
+        item = []
+    if not isinstance(item, list):
+        raise ConfigError("adjudications 必须是数组。")
+    index_ids = {spec.id for spec in target_indexes}
+    docs: list = []
+    seen_index_refs: set[str] = set()
+    for index_pos, entry in enumerate(item):
+        where = f"adjudications[{index_pos}]"
+        obj = _require_object(entry, where)
+        _reject_unknown(obj, _ADJUDICATION_FIELDS, where)
+        index_id = _require_id(obj.get("index_id"), f"{where}.index_id")
+        if index_id not in index_ids:
+            raise ConfigError(
+                f"{where}.index_id 指向未在 target_indexes 声明的索引：{index_id}"
+            )
+        if index_id in seen_index_refs:
+            raise ConfigError(f"{where}.index_id 重复：每个目标索引至多一份裁决台账。")
+        seen_index_refs.add(index_id)
+        path_text = _require_nonempty_str(obj.get("path"), f"{where}.path")
+        doc = load_adjudication_file(path_text, base_dir)
+        if doc.index_id != index_id:
+            raise ConfigError(
+                f"{where}.path 的裁决文件 index_id={doc.index_id}，与配置声明 {index_id} 不一致。"
+            )
+        docs.append(doc)
+    return docs
 
 
 def _parse_source(item: Any, index: int, base_dir: Path) -> SourceSpec:

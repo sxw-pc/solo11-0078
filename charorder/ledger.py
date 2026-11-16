@@ -12,6 +12,7 @@ from typing import Any
 from . import APP_NAME, APP_SLUG, UNICODE_VERSION, __version__
 from .errors import OutputError
 from .models import ScanResult
+from .target_index import rule_digest
 
 
 def write_ledger(result: ScanResult, path: Path) -> None:
@@ -61,7 +62,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             record_count INTEGER NOT NULL,
             key_result_count INTEGER NOT NULL,
             finding_count INTEGER NOT NULL,
-            collision_count INTEGER NOT NULL
+            collision_count INTEGER NOT NULL,
+            target_index_count INTEGER NOT NULL DEFAULT 0,
+            target_index_blocked_count INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE sources (
             source_id TEXT PRIMARY KEY,
@@ -156,6 +159,95 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX ix_findings_rule ON findings (rule_id);
         CREATE INDEX ix_collisions_rule ON collisions (rule_id);
         CREATE INDEX ix_collision_members_record ON collision_members (record_ref);
+        CREATE TABLE target_indexes (
+            index_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            destination TEXT NOT NULL,
+            rule_ids_json TEXT NOT NULL,
+            max_bytes INTEGER,
+            max_chars INTEGER,
+            blocked INTEGER NOT NULL,
+            stale INTEGER NOT NULL,
+            collision_group_count INTEGER NOT NULL,
+            collision_record_count INTEGER NOT NULL,
+            projected_row_count INTEGER NOT NULL,
+            block_reasons_json TEXT NOT NULL,
+            evaluated_at TEXT NOT NULL
+        );
+        CREATE TABLE target_collisions (
+            group_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            index_id TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            target_key_escaped TEXT NOT NULL,
+            target_key_bytes INTEGER NOT NULL,
+            reason_code TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            adjudication_id TEXT,
+            record_count INTEGER NOT NULL,
+            distinct_raw_count INTEGER NOT NULL,
+            sources_json TEXT NOT NULL,
+            rule_ids_json TEXT NOT NULL,
+            raw_variants_json TEXT NOT NULL,
+            block_reasons_json TEXT NOT NULL,
+            PRIMARY KEY (run_id, group_id)
+        );
+        CREATE TABLE target_collision_members (
+            run_id TEXT NOT NULL,
+            group_id TEXT NOT NULL,
+            index_id TEXT NOT NULL,
+            key_result_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            record_ref TEXT NOT NULL,
+            record_id TEXT,
+            raw_display TEXT NOT NULL,
+            target_key TEXT,
+            rule_digest TEXT NOT NULL,
+            PRIMARY KEY (run_id, group_id, key_result_id)
+        );
+        CREATE TABLE target_projection (
+            run_id TEXT NOT NULL,
+            index_id TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            target_key_escaped TEXT NOT NULL,
+            key_bytes INTEGER NOT NULL,
+            key_chars INTEGER NOT NULL,
+            origin TEXT NOT NULL,
+            collision_group_id TEXT,
+            adjudication_id TEXT,
+            over_bytes INTEGER NOT NULL,
+            over_chars INTEGER NOT NULL,
+            provenance_json TEXT NOT NULL
+        );
+        CREATE TABLE adjudications (
+            run_id TEXT NOT NULL,
+            index_id TEXT NOT NULL,
+            adjudication_id TEXT NOT NULL,
+            target_key_escaped TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            reviewed_by TEXT NOT NULL,
+            reviewed_at TEXT NOT NULL,
+            expires_at TEXT,
+            doc_sha256 TEXT NOT NULL,
+            stale INTEGER NOT NULL,
+            member_count INTEGER NOT NULL,
+            replacement_count INTEGER NOT NULL,
+            applied INTEGER NOT NULL,
+            group_id TEXT,
+            block_reasons_json TEXT NOT NULL,
+            PRIMARY KEY (run_id, index_id, adjudication_id)
+        );
+        CREATE INDEX ix_target_projection_key ON target_projection (index_id, target_key);
+        CREATE INDEX ix_target_collisions_index ON target_collisions (index_id);
+        CREATE INDEX ix_target_members_record
+            ON target_collision_members (source_id, record_ref);
+        CREATE VIEW target_projection_summary AS
+            SELECT index_id, origin, COUNT(*) AS row_count
+            FROM target_projection
+            GROUP BY index_id, origin
+            ORDER BY index_id, origin;
         CREATE VIEW finding_counts AS
             SELECT code, severity, COUNT(*) AS finding_count
             FROM findings
@@ -190,8 +282,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
         INSERT INTO runs (
             run_id, app, slug, version, unicode_version, project, target,
             generated_at, config_path, config_sha256, verdict, record_count,
-            key_result_count, finding_count, collision_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            key_result_count, finding_count, collision_count,
+            target_index_count, target_index_blocked_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             result.run_id,
@@ -209,6 +302,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             summary["keys_evaluated"],
             summary["findings_total"],
             summary["collision_groups"],
+            len(result.target_rehearsals),
+            sum(1 for rehearsal in result.target_rehearsals if rehearsal.blocked),
         ),
     )
 
@@ -389,6 +484,149 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             for participant in group.participants
         ],
     )
+    _insert_target_indexes(connection, result)
+
+
+def _insert_target_indexes(
+    connection: sqlite3.Connection, result: ScanResult
+) -> None:
+    digests = {rule.id: rule_digest(rule) for rule in result.config.keys}
+    for rehearsal in result.target_rehearsals:
+        spec = rehearsal.spec
+        connection.execute(
+            """
+            INSERT INTO target_indexes (
+                index_id, run_id, label, destination, rule_ids_json, max_bytes,
+                max_chars, blocked, stale, collision_group_count,
+                collision_record_count, projected_row_count, block_reasons_json,
+                evaluated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                spec.id,
+                result.run_id,
+                spec.label,
+                spec.destination,
+                _json(list(spec.rule_ids)),
+                spec.max_bytes,
+                spec.max_chars,
+                int(rehearsal.blocked),
+                int(rehearsal.stale),
+                len(rehearsal.groups),
+                sum(len(group.participants) for group in rehearsal.groups),
+                rehearsal.projected_row_count,
+                _json(rehearsal.block_reasons),
+                rehearsal.evaluated_at,
+            ),
+        )
+        for group in rehearsal.groups:
+            connection.execute(
+                """
+                INSERT INTO target_collisions (
+                    group_id, run_id, index_id, target_key, target_key_escaped,
+                    target_key_bytes, reason_code, decision, adjudication_id,
+                    record_count, distinct_raw_count, sources_json, rule_ids_json,
+                    raw_variants_json, block_reasons_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    group.group_id,
+                    result.run_id,
+                    spec.id,
+                    group.target_key,
+                    group.target_key_escaped,
+                    group.target_key_bytes,
+                    group.reason_code,
+                    group.decision,
+                    group.adjudication_id,
+                    len(group.participants),
+                    len(group.raw_variants),
+                    _json(group.sources),
+                    _json(group.rule_ids),
+                    _json(group.raw_variants),
+                    _json(group.block_reasons),
+                ),
+            )
+            connection.executemany(
+                """
+                INSERT INTO target_collision_members (
+                    run_id, group_id, index_id, key_result_id, source_id, rule_id,
+                    record_ref, record_id, raw_display, target_key, rule_digest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        result.run_id,
+                        group.group_id,
+                        spec.id,
+                        participant.key_result_id,
+                        participant.source_id,
+                        participant.rule_id,
+                        participant.record_ref,
+                        participant.record_id,
+                        participant.raw_display,
+                        participant.target_key,
+                        digests.get(participant.rule_id),
+                    )
+                    for participant in group.participants
+                ],
+            )
+        connection.executemany(
+            """
+            INSERT INTO target_projection (
+                run_id, index_id, target_key, target_key_escaped, key_bytes,
+                key_chars, origin, collision_group_id, adjudication_id,
+                over_bytes, over_chars, provenance_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    result.run_id,
+                    spec.id,
+                    row.target_key,
+                    row.target_key_escaped,
+                    row.key_bytes,
+                    row.key_chars,
+                    row.origin,
+                    row.collision_group_id,
+                    row.adjudication_id,
+                    int(row.over_bytes),
+                    int(row.over_chars),
+                    _json(row.provenance),
+                )
+                for row in rehearsal.projection
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO adjudications (
+                run_id, index_id, adjudication_id, target_key_escaped, decision,
+                reviewed_by, reviewed_at, expires_at, doc_sha256, stale,
+                member_count, replacement_count, applied, group_id,
+                block_reasons_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    result.run_id,
+                    spec.id,
+                    entry["adjudication_id"],
+                    entry["target_key_escaped"],
+                    entry["decision"],
+                    entry["reviewed_by"],
+                    entry["reviewed_at"],
+                    entry["expires_at"],
+                    entry["doc_sha256"],
+                    int(entry["stale"]),
+                    entry["member_count"],
+                    entry["replacement_count"],
+                    int(entry["applied"]),
+                    entry["group_id"],
+                    _json(entry["block_reasons"]),
+                )
+                for entry in rehearsal.adjudication_register
+            ],
+        )
 
 
 def _record_pk(run_id: str, source_id: str, record_ref: str) -> str:

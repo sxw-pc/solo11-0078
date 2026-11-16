@@ -23,6 +23,7 @@ from .models import (
     SourceRecord,
 )
 from .planner import build_plan
+from .target_index import rehearse_index
 from .transforms import (
     UNIT_SEPARATOR,
     analyze_text,
@@ -46,6 +47,9 @@ def compute_run_id(config: AppConfig, loads: Iterable[SourceLoad]) -> str:
         "tool_version": __version__,
         "unicode_version": UNICODE_VERSION,
         "config_sha256": config.config_sha256,
+        "adjudication_sha256": sorted(
+            (doc.index_id, doc.doc_sha256) for doc in config.adjudications
+        ),
         "sources": [
             {
                 "id": load.spec.id,
@@ -269,6 +273,10 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
             severity=config.severity_for(reason),
         )
 
+    target_rehearsals = _run_target_rehearsals(
+        config, source_loads, key_results, findings, seen_finding_ids, run_id
+    )
+
     findings.sort(
         key=lambda finding: (
             SEVERITY_RANK.get(finding.severity, 9),
@@ -301,9 +309,66 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
         summary=summary,
         verdict=verdict,
         plan={},
+        target_rehearsals=target_rehearsals,
     )
     result.plan = build_plan(result)
     return result
+
+
+def _run_target_rehearsals(
+    config: AppConfig,
+    source_loads: list[SourceLoad],
+    key_results: list[KeyResult],
+    findings: list[Finding],
+    seen_finding_ids: set[str],
+    run_id: str,
+) -> list:
+    if not config.target_indexes:
+        return []
+    input_sha256 = {load.spec.id: load.sha256 for load in source_loads}
+
+    def add_target_finding(
+        code: str,
+        message: str,
+        *,
+        source_id: str | None = None,
+        rule_id: str | None = None,
+        record_ref: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        parsed_details = details or {}
+        fid = _finding_id(
+            run_id, code, source_id, rule_id, record_ref, None, parsed_details
+        )
+        if fid in seen_finding_ids:
+            return
+        seen_finding_ids.add(fid)
+        findings.append(
+            Finding(
+                finding_id=fid,
+                code=code,
+                severity=config.severity_for(code),
+                message=message,
+                source_id=source_id,
+                rule_id=rule_id,
+                record_ref=record_ref,
+                details=parsed_details,
+            )
+        )
+
+    rehearsals = []
+    for spec in config.target_indexes:
+        rehearsals.append(
+            rehearse_index(
+                config=config,
+                spec=spec,
+                key_results=key_results,
+                input_sha256=input_sha256,
+                run_id=run_id,
+                add_finding=add_target_finding,
+            )
+        )
+    return rehearsals
 
 
 def _evaluate_key(
@@ -571,7 +636,34 @@ def _summarize(
         "input_sha256": {
             load.spec.id: load.sha256 for load in loads
         },
+        "target_indexes": _target_index_summary(config, results),
     }
+
+
+def _target_index_summary(
+    config: AppConfig, results: list[KeyResult]
+) -> list[dict[str, Any]]:
+    if not config.target_indexes:
+        return []
+    summaries: list[dict[str, Any]] = []
+    for spec in config.target_indexes:
+        rule_ids = set(spec.rule_ids)
+        covered = [result for result in results if result.rule_id in rule_ids]
+        summaries.append(
+            {
+                "index_id": spec.id,
+                "label": spec.label,
+                "destination": spec.destination,
+                "rule_ids": list(spec.rule_ids),
+                "max_bytes": spec.max_bytes,
+                "max_chars": spec.max_chars,
+                "candidate_keys": len(covered),
+                "has_adjudication_file": any(
+                    doc.index_id == spec.id for doc in config.adjudications
+                ),
+            }
+        )
+    return summaries
 
 
 def _verdict(summary: dict[str, Any]) -> str:

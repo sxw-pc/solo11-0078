@@ -31,6 +31,15 @@ DEFAULT_SEVERITIES: dict[str, str] = {
     "COMPOSITE_SEPARATOR": "high",
     "NORMALIZATION_COLLISION": "high",
     "DUPLICATE_KEY": "high",
+    "TARGET_INDEX_COLLISION": "high",
+    "TARGET_ADJUDICATION_MISSING": "high",
+    "TARGET_ADJUDICATION_INVALID": "high",
+    "TARGET_ADJUDICATION_STALE": "high",
+    "TARGET_ADJUDICATION_CONFLICT": "high",
+    "TARGET_REPLACEMENT_COLLISION": "high",
+    "TARGET_REPLACEMENT_OVERLENGTH": "high",
+    "TARGET_PROJECTION_DUPLICATE": "high",
+    "TARGET_PROJECTION_OVERLENGTH": "high",
 }
 
 CHECK_CODES = tuple(DEFAULT_SEVERITIES.keys())
@@ -56,6 +65,15 @@ CHECK_LABELS: dict[str, str] = {
     "COMPOSITE_SEPARATOR": "复合键含保留分隔符",
     "NORMALIZATION_COLLISION": "归一化后唯一键碰撞",
     "DUPLICATE_KEY": "相同原始值唯一键重复",
+    "TARGET_INDEX_COLLISION": "目标唯一索引跨来源碰撞",
+    "TARGET_ADJUDICATION_MISSING": "目标索引碰撞组缺少人工裁决",
+    "TARGET_ADJUDICATION_INVALID": "目标索引裁决引用失效",
+    "TARGET_ADJUDICATION_STALE": "目标索引裁决已过期或绑定不匹配",
+    "TARGET_ADJUDICATION_CONFLICT": "同一来源记录被矛盾裁决重复占用",
+    "TARGET_REPLACEMENT_COLLISION": "替代键在目标投影中再次碰撞",
+    "TARGET_REPLACEMENT_OVERLENGTH": "替代键超出目标字节/字符长度约束",
+    "TARGET_PROJECTION_DUPLICATE": "目标投影视图仍存在重复键",
+    "TARGET_PROJECTION_OVERLENGTH": "目标投影键超出索引长度约束",
 }
 
 VERDICT_LABEL = {
@@ -143,6 +161,75 @@ class KeyRule:
 
 
 @dataclass(frozen=True)
+class TargetIndexSpec:
+    """Declarative grouping of key rules that share one target unique index."""
+
+    id: str
+    label: str
+    destination: str
+    rule_ids: tuple[str, ...]
+    max_bytes: int | None = None
+    max_chars: int | None = None
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class ReplacementAssignment:
+    """One verifiable replacement key chosen for a distinct business entity."""
+
+    source_id: str
+    rule_id: str
+    record_ref: str
+    record_id: str | None
+    replacement_key: str
+    replacement_escaped: str
+    key_bytes: int
+    key_chars: int
+
+
+@dataclass(frozen=True)
+class AdjudicationMember:
+    """Source-record identity bound to the current input and rule digest."""
+
+    source_id: str
+    rule_id: str
+    record_ref: str
+    record_id: str | None
+    raw_display: str
+    target_key: str
+    rule_digest: str
+
+
+@dataclass(frozen=True)
+class KeyAdjudication:
+    """A reviewed decision for one cross-source target-key collision group."""
+
+    adjudication_id: str
+    index_id: str
+    target_key: str
+    decision: str  # "merge" | "split"
+    members: tuple[AdjudicationMember, ...]
+    reason: str = ""
+    reviewed_by: str = ""
+    reviewed_at: str = ""
+    replacements: tuple[ReplacementAssignment, ...] = ()
+
+
+@dataclass(frozen=True)
+class AdjudicationDocument:
+    """Offline, read-only adjudication register loaded from a JSON file."""
+
+    path: Path
+    doc_sha256: str
+    index_id: str
+    config_sha256: str
+    input_sha256: dict[str, str]
+    decisions: tuple[KeyAdjudication, ...]
+    expires_at: str | None = None
+    version: int = 1
+
+
+@dataclass(frozen=True)
 class AppConfig:
     version: int
     project: ProjectSpec
@@ -152,6 +239,8 @@ class AppConfig:
     config_sha256: str
     severity_overrides: dict[str, str] = field(default_factory=dict)
     max_report_rows: int = 500
+    target_indexes: tuple[TargetIndexSpec, ...] = ()
+    adjudications: tuple[AdjudicationDocument, ...] = ()
 
     @property
     def source_map(self) -> dict[str, SourceSpec]:
@@ -304,6 +393,131 @@ class CollisionGroup:
 
 
 @dataclass
+class TargetCollisionGroup:
+    """A collision inside one declared target unique index projection."""
+
+    group_id: str
+    index_id: str
+    target_key: str
+    target_key_escaped: str
+    target_key_bytes: int
+    reason_code: str
+    participants: list[KeyResult]
+    raw_variants: list[str]
+    sources: list[str]
+    rule_ids: list[str]
+    decision: str = "open"  # open | merge | split | invalid
+    adjudication_id: str | None = None
+    block_reasons: list[str] = field(default_factory=list)
+    projected_targets: list["ProjectedTargetRow"] = field(default_factory=list)
+    adjudication: KeyAdjudication | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "index_id": self.index_id,
+            "target_key": self.target_key,
+            "target_key_escaped": self.target_key_escaped,
+            "target_key_bytes": self.target_key_bytes,
+            "reason_code": self.reason_code,
+            "decision": self.decision,
+            "adjudication_id": self.adjudication_id,
+            "block_reasons": list(self.block_reasons),
+            "sources": list(self.sources),
+            "rule_ids": list(self.rule_ids),
+            "record_count": len(self.participants),
+            "distinct_raw_count": len(self.raw_variants),
+            "raw_variants": self.raw_variants,
+            "participants": [
+                {
+                    "key_result_id": k.key_result_id,
+                    "source_id": k.source_id,
+                    "rule_id": k.rule_id,
+                    "record_ref": k.record_ref,
+                    "record_id": k.record_id,
+                    "raw_values": list(k.raw_values),
+                    "raw_display": k.raw_display,
+                    "target_key": k.target_key,
+                    "target_key_bytes": k.key_bytes,
+                }
+                for k in self.participants
+            ],
+            "projected_targets": [row.to_dict() for row in self.projected_targets],
+        }
+
+
+@dataclass
+class ProjectedTargetRow:
+    """One row of the offline target-index projection (the would-be index rows)."""
+
+    index_id: str
+    target_key: str
+    target_key_escaped: str
+    key_bytes: int
+    key_chars: int
+    provenance: list[dict[str, Any]]
+    origin: str  # untouched | merge | replacement
+    collision_group_id: str | None = None
+    adjudication_id: str | None = None
+    over_bytes: bool = False
+    over_chars: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "index_id": self.index_id,
+            "target_key": self.target_key,
+            "target_key_escaped": self.target_key_escaped,
+            "key_bytes": self.key_bytes,
+            "key_chars": self.key_chars,
+            "origin": self.origin,
+            "collision_group_id": self.collision_group_id,
+            "adjudication_id": self.adjudication_id,
+            "over_bytes": self.over_bytes,
+            "over_chars": self.over_chars,
+            "provenance": list(self.provenance),
+        }
+
+
+@dataclass
+class TargetIndexRehearsal:
+    """Offline rehearsal result for one declared target unique index."""
+
+    spec: TargetIndexSpec
+    groups: list[TargetCollisionGroup]
+    projection: list[ProjectedTargetRow]
+    projection_duplicates: list[dict[str, Any]]
+    projection_overlength: list[dict[str, Any]]
+    adjudication_register: list[dict[str, Any]]
+    block_reasons: list[str]
+    blocked: bool
+    projected_row_count: int
+    evaluated_at: str
+    stale: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "index_id": self.spec.id,
+            "label": self.spec.label,
+            "destination": self.spec.destination,
+            "rule_ids": list(self.spec.rule_ids),
+            "max_bytes": self.spec.max_bytes,
+            "max_chars": self.spec.max_chars,
+            "blocked": self.blocked,
+            "block_reasons": list(self.block_reasons),
+            "stale": self.stale,
+            "evaluated_at": self.evaluated_at,
+            "collision_group_count": len(self.groups),
+            "collision_record_count": sum(len(g.participants) for g in self.groups),
+            "projected_row_count": self.projected_row_count,
+            "projection_duplicates": list(self.projection_duplicates),
+            "projection_overlength": list(self.projection_overlength),
+            "groups": [group.to_dict() for group in self.groups],
+            "projection": [row.to_dict() for row in self.projection],
+            "adjudication_register": list(self.adjudication_register),
+        }
+
+
+@dataclass
 class ScanResult:
     config: AppConfig
     run_id: str
@@ -316,3 +530,4 @@ class ScanResult:
     summary: dict[str, Any]
     verdict: str
     plan: dict[str, Any]
+    target_rehearsals: list[TargetIndexRehearsal] = field(default_factory=list)

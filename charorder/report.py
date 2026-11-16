@@ -159,6 +159,8 @@ def render_markdown(result: ScanResult) -> str:
                 f"> 页面仅展示前 100 组，其余 {len(result.collisions) - 100} 组见 `collisions.json` 与台账。"
             )
 
+    lines.extend(_render_target_indexes_markdown(result))
+
     lines.extend(["", "## 风险清单", ""])
     if not result.findings:
         lines.append("未发现风险项。")
@@ -217,6 +219,89 @@ def render_markdown(result: ScanResult) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _render_target_indexes_markdown(result: ScanResult) -> list[str]:
+    rehearsals = getattr(result, "target_rehearsals", [])
+    if not rehearsals:
+        return []
+    lines = ["", "## 目标唯一索引离线演练", ""]
+    lines.append(
+        "下列投影在同一视图内对全部受影响目标键复核唯一性与 UTF-8 字节/字符长度；"
+        "演练只读来源，不写回任何数据。"
+    )
+    for rehearsal in rehearsals:
+        spec = rehearsal.spec
+        lines.extend(
+            [
+                "",
+                f"### 索引 `{spec.id}` · {_md(spec.destination)}  "
+                f"`{_STATUS_LABEL.get('blocked' if rehearsal.blocked else 'ready', 'blocked' if rehearsal.blocked else 'ready')}`",
+                "",
+                f"- 纳入规则：{_md(', '.join(spec.rule_ids))}",
+                f"- 长度约束：{spec.max_bytes if spec.max_bytes is not None else '—'} 字节 / "
+                f"{spec.max_chars if spec.max_chars is not None else '—'} 字符",
+                f"- 跨来源碰撞组：{len(rehearsal.groups)} · 投影目标行：{rehearsal.projected_row_count}",
+                f"- 阻断原因：{_md(', '.join(rehearsal.block_reasons) or '无')}",
+            ]
+        )
+        if not rehearsal.groups:
+            lines.append("")
+            lines.append("该索引投影内未发现跨来源目标键碰撞。")
+            continue
+        lines.extend(
+            [
+                "",
+                "| 碰撞组 | 目标键（字节） | 来源 / 规则 | 原始分量 | 裁决 | 阻断原因 |",
+                "|---|---|---|---|---|---|",
+            ]
+        )
+        for group in rehearsal.groups:
+            source_bits = "<br>".join(
+                f"{p.source_id}/{p.rule_id} · {p.record_ref}"
+                for p in group.participants
+            )
+            raw_bits = "<br>".join(
+                f"{p.raw_display} → {_md_code(p.target_key_escaped or '')}"
+                for p in group.participants
+            )
+            lines.append(
+                f"| {_md(group.group_id)} | "
+                f"{_md_code(group.target_key_escaped)}（{group.target_key_bytes} B） | "
+                f"{source_bits} | {raw_bits} | "
+                f"{_md(group.decision + ((':' + group.adjudication_id) if group.adjudication_id else ''))} | "
+                f"{_md(', '.join(group.block_reasons) or '—')} |"
+            )
+        lines.extend(["", "**裁决后目标投影（目标身份与归属证据）：**", ""])
+        lines.append("| 目标键 | 字节/字符 | 来源 | 来源记录 | 原始分量 | 来源规则目标键 | 产生方式 |")
+        lines.append("|---|---:|---|---|---|---|---|")
+        for row in rehearsal.projection:
+            prov = row.provenance[0] if row.provenance else {}
+            provenance_bits = "<br>".join(
+                f"{item.get('source_id')}/{item.get('rule_id')} · {item.get('record_ref')}"
+                + (f"（{item.get('record_id')}）" if item.get("record_id") else "")
+                for item in row.provenance
+            )
+            raw_bits = "<br>".join(
+                str(item.get("raw_display", "")) for item in row.provenance
+            )
+            declared_bits = "<br>".join(
+                str(item.get("declared_target_key_escaped", ""))
+                for item in row.provenance
+            )
+            lines.append(
+                f"| {_md_code(row.target_key_escaped)} | {row.key_bytes}/{row.key_chars} | "
+                f"{provenance_bits} | {raw_bits} | {declared_bits} | {_md(row.origin)} |"
+            )
+        duplicate_keys = [item["target_key_escaped"] for item in rehearsal.projection_duplicates]
+        overlength_keys = [item["target_key_escaped"] for item in rehearsal.projection_overlength]
+        if duplicate_keys or overlength_keys:
+            lines.append("")
+            lines.append(
+                f"> 投影复核：重复键 {_md(', '.join(duplicate_keys) or '无')}；"
+                f"超长键 {_md(', '.join(overlength_keys) or '无')}。"
+            )
+    return lines
 
 
 def render_plan_markdown(result: ScanResult) -> str:
@@ -290,24 +375,26 @@ def render_plan_markdown(result: ScanResult) -> str:
                 "",
             ]
         )
-    if plan.get("steps"):
-        examples = plan["steps"][3].get("examples", [])
-        if examples:
-            lines.extend(
-                [
-                    "## 待裁决碰撞示例（最多 20 组）",
-                    "",
-                    "| 组 | 规则 | 目标键 | 记录 |",
-                    "|---|---|---|---|",
-                ]
+    collision_step = next(
+        (step for step in plan["steps"] if step.get("phase") == "collisions"), None
+    )
+    if collision_step and collision_step.get("examples", []):
+        examples = collision_step["examples"]
+        lines.extend(
+            [
+                "## 待裁决碰撞示例（最多 20 组）",
+                "",
+                "| 组 | 规则 | 目标键 | 记录 |",
+                "|---|---|---|---|",
+            ]
+        )
+        for example in examples:
+            lines.append(
+                f"| {_md(example['group_id'])} | {_md(example['rule_id'])} | "
+                f"{_md_code(example['target_key_escaped'])} | "
+                f"{_md(', '.join(str(item) for item in example['record_ids'] if item is not None) or '—')} |"
             )
-            for example in examples:
-                lines.append(
-                    f"| {_md(example['group_id'])} | {_md(example['rule_id'])} | "
-                    f"{_md_code(example['target_key_escaped'])} | "
-                    f"{_md(', '.join(str(item) for item in example['record_ids'] if item is not None) or '—')} |"
-                )
-            lines.append("")
+        lines.append("")
     lines.extend(
         [
             "## 禁止动作",
@@ -317,6 +404,93 @@ def render_plan_markdown(result: ScanResult) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _render_target_indexes_html(result: ScanResult) -> str:
+    rehearsals = getattr(result, "target_rehearsals", [])
+    if not rehearsals:
+        return ""
+    panels: list[str] = []
+    for rehearsal in rehearsals:
+        spec = rehearsal.spec
+        status = "blocked" if rehearsal.blocked else "ready"
+        group_rows = []
+        for group in rehearsal.groups:
+            member_html = "".join(
+                f"""
+                <tr>
+                  <td class="mono">{_e(p.source_id)} / {_e(p.rule_id)}<br><span class="muted">{_e(p.record_ref)}</span></td>
+                  <td class="mono value-cell">{_e(p.raw_display)}</td>
+                  <td class="mono value-cell">{_e(p.target_key_escaped or '')}</td>
+                </tr>"""
+                for p in group.participants
+            )
+            projected = "".join(
+                f"<li><code>{_e(row.target_key_escaped)}</code> "
+                f"<span class=\"muted small\">{row.key_bytes}B/{row.key_chars}字 · "
+                f"{_e(row.origin)} · {len(row.provenance)} 条归属</span></li>"
+                for row in group.projected_targets
+            ) or '<li class="muted">无有效投影（阻断）</li>'
+            group_rows.append(
+                f"""
+            <article class="collision-card">
+              <header>
+                <div>
+                  <div class="eyebrow small">{_e(group.reason_code)}</div>
+                  <h3><span class="mono">{_e(group.group_id)}</span></h3>
+                </div>
+                <span class="count-chip">{_e(group.decision)}</span>
+              </header>
+              <div class="collision-key">
+                <span class="tiny-label">碰撞目标键（{group.target_key_bytes} 字节）</span>
+                <code>{_e(group.target_key_escaped)}</code>
+              </div>
+              <div class="table-scroll compact">
+                <table>
+                  <thead><tr><th>来源 / 规则 / 记录</th><th>原始分量</th><th>规则声明目标键</th></tr></thead>
+                  <tbody>{member_html}</tbody>
+                </table>
+              </div>
+              <p class="note">裁决：{_e(group.adjudication_id or '缺失')} · 阻断原因：{_e(', '.join(group.block_reasons) or '无')}</p>
+              <div class="muted small"><strong>裁决后目标身份：</strong><ul class="mono small">{projected}</ul></div>
+            </article>"""
+            )
+        projection_rows = "".join(
+            f"""
+            <tr>
+              <td class="mono value-cell">{_e(row.target_key_escaped)}</td>
+              <td class="num">{row.key_bytes} / {row.key_chars}</td>
+              <td class="mono">{_e(row.origin)}</td>
+              <td class="mono small">{_e('; '.join(f"{p.get('source_id')}/{p.get('rule_id')}:{p.get('record_ref')}" for p in row.provenance))}</td>
+              <td class="mono small">{_e('; '.join(str(p.get('raw_display', '')) for p in row.provenance))}</td>
+            </tr>"""
+            for row in rehearsal.projection
+        )
+        panels.append(
+            f"""
+        <div class="panel" style="margin-bottom:18px">
+          <div class="section-head">
+            <h3 class="mono">{_e(spec.id)} <span class="muted small">· {_e(spec.destination)}</span></h3>
+            {_status_badge(status)}
+          </div>
+          <p class="note">规则 {_e(', '.join(spec.rule_ids))} · 长度约束 {_e(str(spec.max_bytes) + ' B / ' + str(spec.max_chars) + ' 字')} · 碰撞组 {len(rehearsal.groups)} · 投影行 {rehearsal.projected_row_count} · 阻断 {len(rehearsal.block_reasons)} 项</p>
+          <div class="collisions">{''.join(group_rows) or '<div class="empty-state"><strong>无跨来源碰撞</strong><span>该目标索引投影保持唯一。</span></div>'}</div>
+          <h4 class="small" style="margin-top:16px">完整目标投影视图（唯一性与长度在此同一视图复核）</h4>
+          <div class="table-scroll compact">
+            <table>
+              <thead><tr><th>投影目标键</th><th>字节/字符</th><th>产生方式</th><th>归属来源记录</th><th>原始分量</th></tr></thead>
+              <tbody>{projection_rows}</tbody>
+            </table>
+          </div>
+        </div>"""
+        )
+    return (
+        '<section class="section" id="target-indexes">'
+        '<div class="section-head"><h2>目标唯一索引离线演练</h2>'
+        "<p>同一投影视图复核唯一性与长度；裁决绑定本次输入与规则摘要</p></div>"
+        + "".join(panels)
+        + "</section>"
+    )
 
 
 def render_html(result: ScanResult) -> str:
@@ -838,6 +1012,8 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
     {''.join(collision_cards)}
     {collision_more}
   </section>
+
+  {_render_target_indexes_html(result)}
 
   <section class="section" id="findings">
     <div class="section-head"><h2>风险清单</h2><p>全量明细见 findings.json 与 SQLite 台账</p></div>
