@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import hashlib
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -29,13 +30,48 @@ def write_ledger(result: ScanResult, path: Path) -> None:
             connection.commit()
         finally:
             connection.close()
-        temp_path.replace(path)
+        os.replace(temp_path, path)
+        _fsync_dir(path.parent)
     except (sqlite3.Error, OSError) as exc:
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
             pass
         raise OutputError(f"无法写入 SQLite 台账 {path}：{exc}") from exc
+
+
+def read_ledger_run_id(path: str | Path) -> str | None:
+    """Return the run_id recorded in a ledger without opening it for writing."""
+
+    try:
+        connection = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return None
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        row = connection.execute("SELECT value FROM meta WHERE key = 'run_id'").fetchone()
+        if row is None:
+            row = connection.execute("SELECT run_id FROM runs LIMIT 1").fetchone()
+        return str(row[0]) if row and row[0] else None
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Best-effort directory fsync so a rename survives a hard crash."""
+
+    try:
+        handle = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(handle)
+    except OSError:
+        pass
+    finally:
+        os.close(handle)
 
 
 def _create_schema(connection: sqlite3.Connection) -> None:

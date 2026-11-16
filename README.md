@@ -28,6 +28,9 @@ python -m charorder demo --out out/charorder-demo --force
 # 校验产物哈希、SQLite 台账与 HTML 自包含性
 python -m charorder verify --run out/charorder-demo
 
+# 中断的整批发布恢复：前滚已验证新版本，或回退保留旧版本
+python -m charorder recover --run out/charorder-demo --policy rollback
+
 # 启动只读复核页（仅 GET/HEAD，仅回环地址）
 python -m charorder serve --run out/charorder-demo
 ```
@@ -81,15 +84,15 @@ charorder/
 │   ├── transforms.py          # 宽度折叠、Unicode 规范化检测与文本分析
 │   ├── engine.py              # 键计算、碰撞检测、风险汇总
 │   ├── planner.py             # 确定性迁移计划与门禁
-│   ├── ledger.py              # SQLite 审计台账
+│   ├── ledger.py              # SQLite 审计台账（原子写与只读 run_id 查询）
 │   ├── report.py              # Markdown + 自包含 HTML
-│   ├── artifacts.py           # 运行编排与原子写入
-│   ├── verify.py              # 产物哈希、台账、HTML 完整性校验
+│   ├── artifacts.py           # 运行编排、隔离暂存、整批发布与故障恢复
+│   ├── verify.py              # 跨产物 run_id、哈希、台账、发布状态与 HTML 校验
 │   ├── server.py              # 回环地址只读复核服务器
-│   └── cli.py                 # 命令行入口
+│   └── cli.py                 # 命令行入口（run / demo / verify / recover / serve）
 ├── fixtures/demo/             # 合成客户 / 商品 / 联系人数据
 ├── tools/build_demo_fixtures.py
-├── tests/                     # 87 个 unittest 用例
+├── tests/                     # 104 个 unittest 用例
 ├── pyproject.toml
 └── out/                       # demo 运行产物（可重建）
 ```
@@ -251,7 +254,38 @@ charorder/
 
 默认输出目录为 `charorder-runs/<run-id>/`；显式传入 `--out` 可指定位置。目录非空时默认拒绝写入，需用 `--force` 覆盖已知产物名。工具不会清理目录中的未知文件。
 
-### 6.1 SQLite 台账查询示例
+### 6.1 整批发布与故障恢复（`--force` 覆盖语义）
+
+单个文件的原子替换不足以保证一次 `--force` 覆盖的整套证据同时切换。本工具把每次运行的九件产物构建在**隔离暂存目录**中，全套通过 `verify_run` 后，才经一次**符号链接原子翻转**整体发布，因此审核人员在任何时刻只能看到一套完整、自洽的版本，绝不会看到“旧 manifest 配新文件”的半版结果。
+
+整批发布的目录布局：
+
+```
+<run-dir>/
+  report.html ... manifest.json     # 根目录为不可变符号链接农场，全部指向当前版本
+  .charorder/
+    current                          # 原子翻转的发布指针 -> ../releases/<run-id>
+    journal.json                     # 持久发布状态机（current / pending）
+    events.log                       # 仅追加的审计事件日志（JSON Lines）
+    publish.lock                     # 跨进程发布锁（flock）
+    releases/<run-id>/               # 完整、已验证、不可变的发布版本
+    staging/<s-id>/                  # 隔离的未发布产物，外部入口不可见
+    quarantine/                      # 中止或未发布的证据，保留可复核
+```
+
+发布与恢复保证：
+
+- **中断时无半版可见**：暂存阶段（部分 JSON/Markdown 已写、或普通产物写全但 SQLite 未替换）崩溃时，当前版本保持不变，未完成产物只存在于 `staging/`；恢复时只能中止并隔离，审核人员继续看到旧版本。
+- **新版本失败不丢失旧版本**：全套新产物（含 SQLite 与新 manifest）已验证但尚未发布时崩溃，旧版本仍是当前版本；旧版本同时保留在 `releases/` 下可独立复核。
+- **切点 3 的两种合法恢复选择**：
+  - `recover --policy rollforward`（或环境变量 `CHARORDER_RECOVERY_POLICY=rollforward`）：重新验证全套新产物后前滚发布；
+  - `recover --policy rollback`（默认）：保留旧版本为当前版本，把未发布的新版本隔离到 `quarantine/`。
+  两种选择都会在 `journal.json` 与 `events.log` 中留下可追溯记录；前两个切点不允许前滚，只能继续展示旧版本。
+- **重复 `--force` 保持同版**：相同输入派生相同 `run_id`，已验证的发布版本逐字节复用，不生成混合版或重复版本，也不会遗留看似有效的旧 manifest 配新文件。
+- 每次 `run` 启动时会先在发布锁内完成恢复，再处理新事务；`verify` 检测到未完成的整批发布时照常校验当前版本并给出告警（退出码 `3`），提示先运行 `recover`。
+- 旧版扁平目录（文件直接位于运行根目录）仍可被 `verify` 只读校验；首次对其 `--force` 重跑时会先经完整性验证再纳入整批发布布局，事件记录为 `adopted_legacy_layout`。
+
+### 6.2 SQLite 台账查询示例
 
 ```bash
 sqlite3 out/charorder-demo/ledger.sqlite \
@@ -318,6 +352,8 @@ python -m charorder run --config my-config.json --out out/gate --fail-on high
 - `--fail-on medium`：high 或 medium 时退出码 `1`；
 - `--fail-on low`：任何风险时退出码 `1`；
 - `--fail-on none`（默认）：发现风险也返回 `0`，仅配置 / 输入 / 输出错误返回 `2`。
+- `verify` 校验通过返回 `0`、校验失败返回 `2`；当前版本完整但存在未完成的整批发布时返回 `3`（结论仍可复核，需运行 `recover`）。
+- `recover` 成功处理（含“无待恢复事务”）返回 `0`，配置 / 输出错误返回 `2`。
 
 建议把“高等级发现为 0”和“碰撞组为 0”作为唯一索引创建前的硬门禁。
 
@@ -331,10 +367,13 @@ python -m charorder run --config my-config.json --out out/gate --fail-on high
 - `python -m charorder verify --run <dir>` 会校验：
   - manifest 内所有产物的大小与 SHA-256；
   - `plan.json` 哈希与 `run_id`；
-  - SQLite `integrity_check`、`user_version`、行数与汇总计数；
+  - `findings.json`、`collisions.json`、`keys.jsonl` 与 SQLite 台账的 `run_id` 全部与 manifest 一致，且 `keys.jsonl` 行数与汇总计数一致；
+  - manifest 与 `plan.json` 的来源摘要（`source_fingerprints`）一致；
+  - SQLite `integrity_check`、`user_version`、行数与汇总计数，且台账只含单一 `run_id`；
+  - 整批发布布局下，根目录每个链接、`.charorder/current` 与 `journal.json` 登记版本三者一致（杜绝新旧拼接）；
   - HTML 为 UTF-8 自包含页面，无外部脚本 / 样式 / 图片 / `@import`；
   - manifest 声明源文件只读、无网络访问。
-- 篡改任一产物后 `verify` 会失败。
+- 篡改任一产物、混用两个版本的文件、或让发布指针与日志登记版本不一致，`verify` 都会失败。
 
 ---
 
@@ -377,7 +416,7 @@ python tools/build_demo_fixtures.py
 python -m unittest discover -s tests -v
 ```
 
-87 个标准库 `unittest` 用例覆盖：
+104 个标准库 `unittest` 用例覆盖：
 
 - 宽度折叠、NFC/NFD、casefold、不可见字符策略、空白折叠与管线顺序；
 - 不可见 / 双向 / 控制 / 替换 / 代理 / 乱码 / 空白检测；
@@ -387,7 +426,8 @@ python -m unittest discover -s tests -v
 - 计划确定性、产物哈希、源文件未被修改、SQLite 台账计数与视图；
 - 自包含 HTML、无外部资源、XSS 转义；
 - CLI 退出码、`verify` 篡改检测；
-- 只读服务器 GET/HEAD/405/404 与绑定限制。
+- 只读服务器 GET/HEAD/405/404 与绑定限制；
+- 整批发布与故障恢复（`tests/test_recovery.py`，子进程注入真实进程中断）：三个切点下无半版可见、B 失败后 A 仍有效、前滚 / 回退恢复可审计、重复 `--force` 同版、提交窗口崩溃的失效安全、旧扁平布局纳管与新旧拼接检测。
 
 测试使用临时目录，不会修改演示 fixture。
 

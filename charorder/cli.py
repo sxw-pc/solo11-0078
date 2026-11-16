@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import APP_NAME, APP_SLUG, APP_TAGLINE, __version__
-from .artifacts import execute
+from .artifacts import execute, read_events, recover_run
 from .config import load_config
 from .errors import CharorderError
 from .models import SEVERITY_RANK, SEVERITIES
@@ -51,6 +51,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = subparsers.add_parser("verify", help="校验一次运行的产物哈希与 SQLite 台账")
     verify.add_argument("--run", required=True, help="包含 manifest.json 的运行目录")
+
+    recover = subparsers.add_parser(
+        "recover",
+        help="恢复一次中断的整批发布（前滚发布已验证的新版本，或回退保留旧版本）",
+    )
+    recover.add_argument("--run", required=True, help="运行目录")
+    recover.add_argument(
+        "--policy",
+        choices=("rollback", "rollforward"),
+        default=None,
+        help=(
+            "恢复策略：rollback（默认，保留当前版本并隔离未发布产物）或 "
+            "rollforward（仅在切点 3：验证全套新产物后前滚发布）"
+        ),
+    )
 
     serve = subparsers.add_parser("serve", help="以只读 HTTP 方式查看一次运行")
     serve.add_argument("--run", required=True, help="运行目录")
@@ -104,7 +119,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"碰撞组 {report['collision_groups']}"
             )
             print("SQLite integrity_check：ok · HTML 自包含：是")
+            for warning in report.get("warnings", []):
+                print(f"注意：{warning}")
+            if report.get("pending_publish"):
+                return 3
             return 0
+        if args.command == "recover":
+            return _recover_command(run_dir=Path(args.run), policy=args.policy)
         if args.command == "serve":
             serve_run(args.run, host=args.host, port=args.port)
             return 0
@@ -116,6 +137,28 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("已中断。", file=sys.stderr)
         return 130
+
+
+def _recover_command(*, run_dir: Path, policy: str | None) -> int:
+    summary = recover_run(run_dir, policy=policy)
+    print("恢复处理完成。")
+    print(f"决定：{summary['decision']}")
+    if summary.get("reason"):
+        print(f"原因：{summary['reason']}")
+    if summary.get("current_run_id"):
+        print(f"当前版本 run_id：{summary['current_run_id']}")
+    if summary.get("run_id") and summary["run_id"] != summary.get("current_run_id"):
+        print(f"中断版本 run_id：{summary['run_id']}")
+    if summary.get("release"):
+        print(f"发布版本目录：{summary['release']}")
+    if summary.get("quarantined"):
+        print(f"未发布产物已隔离至：{summary['quarantined']}")
+    print("恢复决定已持久记录于 .charorder/journal.json 与 .charorder/events.log。")
+    events = read_events(run_dir)
+    if events:
+        last = events[-1]
+        print(f"最新审计事件：{last['event']} @ {last['at']}")
+    return 0
 
 
 def _run_command(
