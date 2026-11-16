@@ -152,6 +152,56 @@ class ConfigFailureTests(unittest.TestCase):
         }
         self._expect(config, "SQLite TEXT 必须以 utf-8")
 
+    def test_identity_rejected_for_non_sqlite_sources(self) -> None:
+        config = copy.deepcopy(self.base)
+        config["sources"][0]["identity"] = "logical_content"
+        self._expect(config, "identity 仅适用于 SQLite 源")
+
+    def test_unknown_sqlite_identity_mode_rejected(self) -> None:
+        db = self.root / "records.sqlite"
+        db.write_bytes(b"SQLite format 3\x00")
+        config = copy.deepcopy(self.base)
+        config["sources"][0] = {
+            "id": "s1",
+            "type": "sqlite",
+            "path": "records.sqlite",
+            "record_id_field": "id",
+            "table": "records",
+            "identity": "frozen_bytes",
+        }
+        self._expect(config, "identity 必须是")
+
+    def test_sqlite_defaults_to_logical_content_identity(self) -> None:
+        db = self.root / "records.sqlite"
+        db.write_bytes(b"SQLite format 3\x00")
+        config = copy.deepcopy(self.base)
+        config["sources"][0] = {
+            "id": "s1",
+            "type": "sqlite",
+            "path": "records.sqlite",
+            "record_id_field": "id",
+            "table": "records",
+        }
+        path = write_config(self.root / "ok.json", config)
+        parsed = load_config(path)
+        self.assertEqual(parsed.sources[0].identity_mode, "logical_content")
+
+    def test_sqlite_physical_snapshot_identity_accepted(self) -> None:
+        db = self.root / "records.sqlite"
+        db.write_bytes(b"SQLite format 3\x00")
+        config = copy.deepcopy(self.base)
+        config["sources"][0] = {
+            "id": "s1",
+            "type": "sqlite",
+            "path": "records.sqlite",
+            "record_id_field": "id",
+            "table": "records",
+            "identity": "physical_snapshot",
+        }
+        path = write_config(self.root / "ok.json", config)
+        parsed = load_config(path)
+        self.assertEqual(parsed.sources[0].identity_mode, "physical_snapshot")
+
 
 if __name__ == "__main__":
     unittest.main()

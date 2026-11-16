@@ -190,6 +190,11 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(load.records[0].record_id, "1")
         self.assertEqual(load.records[0].values["email"], "A@Example.com")
         self.assertTrue(load.decode_note["sqlite_read_only"])
+        self.assertTrue(load.decode_note["sqlite_snapshot"])
+        self.assertEqual(load.identity_mode, "logical_content")
+        self.assertEqual(load.sha256, load.identity["logical_content"]["sha256"])
+        self.assertTrue(load.identity["snapshot"]["read_only"])
+        self.assertTrue(load.identity["snapshot"]["temporary_files_removed"])
 
     def test_sqlite_missing_table_is_fatal(self) -> None:
         path = self.root / "records.sqlite"

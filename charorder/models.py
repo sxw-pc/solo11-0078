@@ -85,6 +85,25 @@ class SourceSpec:
     delimiter: str = ","
     quotechar: str = '"'
     table: str | None = None
+    # SQLite only: which evidence defines source identity.
+    # logical_content  -> the actually selected columns/rows, stable across checkpoints;
+    # physical_snapshot -> bytes of the private consistent snapshot used by this run.
+    identity_mode: str = "logical_content"
+
+
+SQLITE_IDENTITY_MODES = ("logical_content", "physical_snapshot")
+SQLITE_IDENTITY_SEMANTICS: dict[str, str] = {
+    "logical_content": (
+        "身份仅由本次实际选中的表、列、记录标识与行值的稳定编码决定；"
+        "未选中的表、WAL checkpoint 或页面重排不会改变同一组键输入的身份，"
+        "因此相同键输入可复用同一个 run_id。"
+    ),
+    "physical_snapshot": (
+        "身份由包含 WAL 已提交内容的私有一致性数据库快照字节决定；"
+        "文件布局变化、页面重排或未选中表变化都可能产生新身份（新 run_id），"
+        "审核人员据此把结果视为一次新的迁移预检。"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -195,6 +214,11 @@ class SourceLoad:
     size_bytes: int
     issues: list[Defect] = field(default_factory=list)
     decode_note: dict[str, Any] | None = None
+    # How source identity (and therefore run_id) is derived for this load.
+    # CSV / JSONL keep the legacy "file_bytes" mode (whole-file content hash).
+    identity_mode: str = "file_bytes"
+    # Identity evidence actually used: digest/size plus snapshot details for SQLite.
+    identity: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

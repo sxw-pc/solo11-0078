@@ -98,14 +98,15 @@ def render_markdown(result: ScanResult) -> str:
         "",
         "## 源文件指纹",
         "",
-        "| 源 | 类型 | 路径 | 记录 | 编码 | SHA-256 |",
-        "|---|---|---|---:|---|---|",
+        "| 源 | 类型 | 路径 | 记录 | 编码 | 身份口径 | SHA-256 |",
+        "|---|---|---|---:|---|---|---|",
     ]
     for source in summary["sources"]:
         lines.append(
             f"| {_md(source['source_id'])} | {_md(source['kind'])} | "
             f"{_md_code(source['path'])} | {source['records']} | "
-            f"{_md(source['encoding'])} | {_md_code(source['sha256'][:20] + '…')} |"
+            f"{_md(source['encoding'])} | {_md(source.get('identity_mode', 'file_bytes'))} | "
+            f"{_md_code(source['sha256'][:20] + '…')} |"
         )
 
     lines.extend(
@@ -247,13 +248,14 @@ def render_plan_markdown(result: ScanResult) -> str:
         "",
         "## 源文件指纹",
         "",
-        "| 源 | 类型 | 路径 | 记录 | SHA-256 | 状态 |",
-        "|---|---|---|---:|---|---|",
+        "| 源 | 类型 | 路径 | 记录 | 身份口径 | SHA-256 | 状态 |",
+        "|---|---|---|---:|---|---|---|",
     ]
     for source in plan["source_fingerprints"]:
         lines.append(
             f"| {_md(source['source_id'])} | {_md(source['kind'])} | "
             f"{_md_code(source['path'])} | {source['records']} | "
+            f"{_md(source.get('identity_mode', 'file_bytes'))} | "
             f"{_md_code(source['sha256'])} | "
             f"{_md(_STATUS_LABEL.get(source['status'], source['status']))} |"
         )
@@ -336,6 +338,7 @@ def render_html(result: ScanResult) -> str:
           <td><span class="mono path">{_e(source['path'])}</span></td>
           <td class="num">{source['records']:,}</td>
           <td class="num">{source['key_results']:,}</td>
+          <td><span class="mono">{_e(source.get('identity_mode', 'file_bytes'))}</span></td>
           <td>{_status_badge('blocked' if source['findings_by_severity'].get('high', 0) else 'review' if source['findings_by_severity'].get('medium', 0) else 'ready')}</td>
           <td class="mono hash" title="{_e(source['sha256'])}">{_e(source['sha256'][:16])}…</td>
         </tr>"""
@@ -815,7 +818,7 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
     <div class="section-head"><h2>源文件与只读指纹</h2><p>哈希已写入计划与台账</p></div>
     <div class="panel table-scroll">
       <table>
-        <thead><tr><th>源</th><th>路径</th><th>记录</th><th>键结果</th><th>状态</th><th>SHA-256</th></tr></thead>
+        <thead><tr><th>源</th><th>路径</th><th>记录</th><th>键结果</th><th>身份口径</th><th>状态</th><th>SHA-256</th></tr></thead>
         <tbody>{source_rows}</tbody>
       </table>
       <p class="note">源文件在扫描前后均以只读方式处理；SQLite 通过 <code>mode=ro</code> 与 <code>PRAGMA query_only</code> 打开。报告只展示相对配置目录的路径。</p>

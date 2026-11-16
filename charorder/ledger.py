@@ -74,7 +74,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             key_result_count INTEGER NOT NULL,
             source_finding_count INTEGER NOT NULL,
             columns_json TEXT NOT NULL,
-            decode_note_json TEXT NOT NULL
+            decode_note_json TEXT NOT NULL,
+            identity_mode TEXT NOT NULL DEFAULT 'file_bytes',
+            identity_json TEXT NOT NULL DEFAULT '{}'
         );
         CREATE TABLE rules (
             rule_id TEXT PRIMARY KEY,
@@ -219,8 +221,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             INSERT INTO sources (
                 source_id, kind, path, sha256, size_bytes, encoding,
                 record_count, key_result_count, source_finding_count,
-                columns_json, decode_note_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                columns_json, decode_note_json, identity_mode, identity_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 load.spec.id,
@@ -234,6 +236,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 stats["source_findings"],
                 _json(list(load.columns)),
                 _json(load.decode_note or {}),
+                load.identity_mode,
+                _json(load.identity),
             ),
         )
 

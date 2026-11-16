@@ -41,20 +41,26 @@ def now_iso() -> str:
 
 
 def compute_run_id(config: AppConfig, loads: Iterable[SourceLoad]) -> str:
+    sources_payload = []
+    for load in loads:
+        entry: dict[str, Any] = {
+            "id": load.spec.id,
+            "kind": load.spec.kind,
+            "sha256": load.sha256,
+            "size_bytes": load.size_bytes,
+        }
+        if load.spec.kind == "sqlite":
+            # SQLite identity always comes from the private snapshot read by
+            # this run; the declared mode decides which snapshot-derived
+            # digest is used so run_id matches the actual key inputs.
+            entry["identity_mode"] = load.identity_mode
+        sources_payload.append(entry)
     payload = {
         "schema": "charorder/run/v1",
         "tool_version": __version__,
         "unicode_version": UNICODE_VERSION,
         "config_sha256": config.config_sha256,
-        "sources": [
-            {
-                "id": load.spec.id,
-                "kind": load.spec.kind,
-                "sha256": load.sha256,
-                "size_bytes": load.size_bytes,
-            }
-            for load in loads
-        ],
+        "sources": sources_payload,
     }
     digest = hashlib.sha256(
         json.dumps(
@@ -524,6 +530,8 @@ def _summarize(
                 "path": load.spec.display_path,
                 "sha256": load.sha256,
                 "size_bytes": load.size_bytes,
+                "identity_mode": load.identity_mode,
+                "identity": load.identity,
                 "encoding": load.spec.encoding,
                 "records": len(load.records),
                 "columns": list(load.columns),

@@ -14,7 +14,7 @@ from .engine import scan
 from .errors import OutputError
 from .ingest import load_sources
 from .ledger import write_ledger
-from .models import ScanResult
+from .models import SQLITE_IDENTITY_SEMANTICS, ScanResult
 from .report import render_html, render_markdown, render_plan_markdown
 
 ARTIFACT_FILES = (
@@ -122,6 +122,7 @@ def write_artifacts(
         "summary": result.summary,
         "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
         "source_fingerprints": result.plan["source_fingerprints"],
+        "source_identities": _source_identities(result),
         "artifacts": artifact_records,
         "ledger": {
             "path": "ledger.sqlite",
@@ -138,6 +139,39 @@ def write_artifacts(
     }
     _atomic_write_bytes(output_dir / "manifest.json", _json_bytes(manifest))
     return manifest
+
+
+def _source_identities(result: ScanResult) -> list[dict[str, Any]]:
+    """Declare, per source, exactly which evidence defines run identity.
+
+    For SQLite sources both candidate digests are listed, but the selected
+    mode names the one used for run_id; the snapshot block proves the digest
+    was computed from the private consistent copy actually queried.
+    """
+
+    identities: list[dict[str, Any]] = []
+    for load in result.source_loads:
+        entry: dict[str, Any] = {
+            "source_id": load.spec.id,
+            "kind": load.spec.kind,
+            "path": load.spec.display_path,
+            "identity_mode": load.identity_mode,
+            "digest": load.sha256,
+            "size_bytes": load.size_bytes,
+            "evidence": load.identity,
+        }
+        if load.spec.kind == "sqlite":
+            entry["audit_semantics"] = SQLITE_IDENTITY_SEMANTICS[load.identity_mode]
+            entry["snapshot_read_only"] = True
+            entry["live_main_file_hashed"] = False
+            entry["uncommitted_rows_included"] = False
+        else:
+            entry["audit_semantics"] = (
+                "整份源文件字节的 SHA-256；CSV/JSONL 不含数据库快照语义，"
+                "行为与旧版本保持一致。"
+            )
+        identities.append(entry)
+    return identities
 
 
 def _check_output_target(path: Path, *, force: bool) -> None:

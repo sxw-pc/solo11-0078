@@ -201,6 +201,7 @@ def _verify_ledger(
             errors.append("台账 collisions 行数与 manifest 不一致。")
         if actual_members != summary.get("collision_records"):
             errors.append("台账 collision_members 行数与 manifest 不一致。")
+        _verify_source_identities(connection, manifest, errors)
         return {
             "integrity_check": integrity,
             "findings": actual_findings,
@@ -212,6 +213,60 @@ def _verify_ledger(
         return {}
     finally:
         connection.close()
+
+
+def _verify_source_identities(
+    connection: sqlite3.Connection,
+    manifest: dict[str, Any],
+    errors: list[str],
+) -> None:
+    """Cross-check declared source identities against the ledger and manifest."""
+
+    identities = manifest.get("source_identities")
+    if identities is None:
+        # Manifests written by older releases predate this section.
+        return
+    if not isinstance(identities, list):
+        errors.append("manifest.source_identities 必须是数组。")
+        return
+    ledger_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(sources)")
+    }
+    has_identity = {"identity_mode", "identity_json"} <= ledger_columns
+    for entry in identities:
+        if not isinstance(entry, dict):
+            errors.append("manifest.source_identities 含非对象条目。")
+            continue
+        source_id = entry.get("source_id")
+        mode = entry.get("identity_mode")
+        if entry.get("digest") != entry.get("evidence", {}).get("digest"):
+            errors.append(f"源 {source_id} 的身份摘要与证据不一致。")
+        if entry.get("kind") == "sqlite":
+            if mode not in {"logical_content", "physical_snapshot"}:
+                errors.append(f"源 {source_id} 的 identity_mode 不合法。")
+            evidence = entry.get("evidence", {})
+            snapshot = evidence.get("snapshot", {})
+            if snapshot.get("read_only") is not True:
+                errors.append(f"源 {source_id} 未声明只读快照。")
+            if entry.get("live_main_file_hashed") is not False:
+                errors.append(f"源 {source_id} 不得哈希活动主库文件。")
+            if entry.get("uncommitted_rows_included") is not False:
+                errors.append(f"源 {source_id} 必须排除未提交事务。")
+            logical = evidence.get("logical_content", {})
+            physical = evidence.get("physical_snapshot", {})
+            if not isinstance(logical.get("sha256"), str) or not isinstance(
+                physical.get("sha256"), str
+            ):
+                errors.append(f"源 {source_id} 缺少逻辑/物理快照摘要。")
+            if has_identity:
+                row = connection.execute(
+                    "SELECT identity_mode, sha256 FROM sources WHERE source_id = ?",
+                    (source_id,),
+                ).fetchone()
+                if row is None:
+                    errors.append(f"台账缺少源 {source_id} 的身份记录。")
+                elif row[0] != mode or row[1] != entry.get("digest"):
+                    errors.append(f"台账源 {source_id} 的身份口径或摘要与 manifest 不一致。")
 
 
 def _verify_html(root: Path, errors: list[str]) -> None:

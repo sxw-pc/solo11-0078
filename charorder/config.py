@@ -14,6 +14,7 @@ from .errors import ConfigError
 from .models import (
     DEFAULT_SEVERITIES,
     SEVERITIES,
+    SQLITE_IDENTITY_MODES,
     AppConfig,
     KeyRule,
     ProjectSpec,
@@ -34,6 +35,7 @@ _SOURCE_FIELDS = {
     "delimiter",
     "quotechar",
     "table",
+    "identity",
 }
 _KEY_FIELDS = {
     "id",
@@ -215,10 +217,21 @@ def _parse_source(item: Any, index: int, base_dir: Path) -> SourceSpec:
         raise ConfigError(f"{where} 只有 CSV 源支持 delimiter / quotechar。")
 
     table: str | None = None
+    identity_mode = "logical_content"
     if kind == "sqlite":
         table = _require_nonempty_str(obj.get("table"), f"{where}.table")
+        if "identity" in obj:
+            identity_mode = _require_nonempty_str(
+                obj.get("identity"), f"{where}.identity"
+            )
+            if identity_mode not in SQLITE_IDENTITY_MODES:
+                raise ConfigError(
+                    f"{where}.identity 必须是 {' / '.join(SQLITE_IDENTITY_MODES)}。"
+                )
     elif "table" in obj:
         raise ConfigError(f"{where}.table 仅适用于 SQLite 源。")
+    elif "identity" in obj:
+        raise ConfigError(f"{where}.identity 仅适用于 SQLite 源。")
 
     if kind != "csv" and "encoding" in obj and kind == "sqlite":
         # SQLite text is UTF-8 by contract. An explicit common alias is accepted,
@@ -245,6 +258,7 @@ def _parse_source(item: Any, index: int, base_dir: Path) -> SourceSpec:
         delimiter=delimiter,
         quotechar=quotechar,
         table=table,
+        identity_mode=identity_mode,
     )
 
 

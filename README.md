@@ -179,7 +179,8 @@ charorder/
   "type": "sqlite",
   "path": "contacts.sqlite",
   "record_id_field": "contact_id",
-  "table": "contacts"
+  "table": "contacts",
+  "identity": "logical_content"
 }
 ```
 
@@ -187,8 +188,12 @@ charorder/
 - `record_id_field`：CSV 列名、JSONL 顶层字段名、SQLite 列名。缺失时仍保留记录并按行号审计，同时产生 `MISSING_RECORD_ID`。
 - `encoding_errors`：`replace`（默认，替代为 `U+FFFD` 后继续）或 `strict`（遇到非法字节直接报错退出）。
 - CSV 支持 `delimiter` / `quotechar`；JSONL 每行必须是顶层 JSON 对象。
-- SQLite 只读打开：URI `mode=ro` + `PRAGMA query_only=ON`，只查询规则引用的列；`TEXT` 按 UTF-8 解码。
-- 工具不写回任何源文件；源文件 SHA-256 会写入计划与台账。
+- SQLite 源先做**私有一致性快照**再读取：以 `mode=ro` 只读打开活动库，用在线备份 API 把包含 WAL 已提交页的单一事务一致镜像复制到临时目录，随后在该快照内以 `BEGIN` 固定一个只读事务（`PRAGMA query_only=ON`），表结构、所需列与行值全部来自同一份冻结镜像；备份期间若有写入者提交，SQLite 会整体重启备份，快照只可能是提交前或提交后的完整版本，不会拼接两个事务。未提交事务的行不会进入快照；源文件（含 `-wal`/`-shm`）不被修改，临时快照文件在读取后立即清理。
+- SQLite 来源身份由源级 `identity` 字段声明（仅 SQLite 可用，默认 `logical_content`）：
+  - `logical_content`：对实际选中的表、列、记录标识与行值做稳定二进制编码（`typeof()` 保留存储类型，区分 `NULL`、空串、整数/实数/文本/Blob 与重复行；行按字节帧排序，不依赖无 `ORDER BY` 的返回顺序）。未选中表、WAL checkpoint 或页面重排不改变同一组键输入的身份，相同键输入可复用同一个 `run_id`。
+  - `physical_snapshot`：以包含 WAL 已提交内容的私有快照文件字节 SHA-256 为身份；文件布局、页面重排或未选中表变化都可能产生新身份（新 `run_id`），审核人员据此把结果视为一次新的迁移预检。
+  - 两种口径都只哈希本次实际读取的私有快照，绝不哈希活动主库文件；两个候选摘要都会写入 manifest 与 SQLite 台账，所选口径决定 `run_id`。
+- 工具不写回任何源文件；CSV/JSONL 保持整文件字节 SHA-256（`file_bytes` 口径），SQLite 身份摘要与快照证据会写入计划、manifest 与台账。
 
 ### 5.3 目标键
 
@@ -377,14 +382,16 @@ python tools/build_demo_fixtures.py
 python -m unittest discover -s tests -v
 ```
 
-87 个标准库 `unittest` 用例覆盖：
+109 个标准库 `unittest` 用例覆盖：
 
 - 宽度折叠、NFC/NFD、casefold、不可见字符策略、空白折叠与管线顺序；
 - 不可见 / 双向 / 控制 / 替换 / 代理 / 乱码 / 空白检测；
-- 配置字段、错误路径、重复 ID、未知检查码；
+- 配置字段、错误路径、重复 ID、未知检查码、SQLite `identity` 口径校验；
 - CSV BOM、非法字节替换与严格模式、JSONL 坏行续跑、SQLite 只读与元数据解码；
+- SQLite WAL 未 checkpoint 提交进入快照证据、未提交事务被排除、备份中途并发提交不混版（确定性暂停/重启 + 线程端到端）；
+- `logical_content` 与 `physical_snapshot` 两种身份在 checkpoint/物理重排后的复用与分化、NULL/空串/类型/重复行编码不碰撞且与返回顺序无关、临时快照清理；
 - 大小写 / 全角 / 规范化碰撞、复合键碰撞、重复记录标识、空键、必需值缺失、超限；
-- 计划确定性、产物哈希、源文件未被修改、SQLite 台账计数与视图；
+- 计划确定性、产物哈希、源文件未被修改、SQLite 台账身份/计数与视图；
 - 自包含 HTML、无外部资源、XSS 转义；
 - CLI 退出码、`verify` 篡改检测；
 - 只读服务器 GET/HEAD/405/404 与绑定限制。
@@ -395,8 +402,8 @@ python -m unittest discover -s tests -v
 
 ## 13. 已知边界
 
-- 所有源记录会一次读入内存；本工具面向迁移前检查，不是超大表的流式扫描器。
-- SQLite 源哈希基于主数据库文件；正在使用 WAL 的数据库应在稳定快照或 checkpoint 后检查，并确保 `-wal` 不会被并发写入。
+- 所有源记录会一次读入内存；本工具面向迁移前检查，不是超大表的流式扫描器。SQLite 快照同样会把源库完整复制到临时目录并把选中记录读入内存。
+- SQLite 来源身份基于读取前生成的私有一致性快照（含 WAL 已提交内容），而非活动主库字节；`logical_content` 对 checkpoint/页面重排稳定，`physical_snapshot` 会随物理布局变化产生新 `run_id`。两种口径都排除未提交事务，但无法代表快照完成之后才提交的写入。
 - 宽度折叠只处理 East Asian Width `F/H` 片段，不是完整 NFKC；需要更广兼容折叠时显式选择 `NFKC`。
 - 大小写映射基于运行时 Python 的 Unicode 数据，不使用数据库 collation 或系统 locale。运行 ID 包含 Unicode 版本。
 - 碰撞检测按 UTF-8 二进制键精确分组；不提供模糊匹配、编辑距离、拼音或语音近似。

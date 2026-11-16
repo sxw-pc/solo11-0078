@@ -251,6 +251,8 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 "path": source["path"],
                 "sha256": source["sha256"],
                 "size_bytes": source["size_bytes"],
+                "identity_mode": source["identity_mode"],
+                "identity": source["identity"],
                 "encoding": source["encoding"],
                 "records": source["records"],
                 "status": (

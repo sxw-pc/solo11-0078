@@ -86,6 +86,23 @@ class DemoEngineTests(unittest.TestCase):
         }
         for load in self.result.source_loads:
             self.assertEqual(fingerprints[load.spec.id]["sha256"], load.sha256)
+            self.assertEqual(
+                fingerprints[load.spec.id]["identity_mode"], load.identity_mode
+            )
+            self.assertEqual(
+                fingerprints[load.spec.id]["identity"]["digest"],
+                load.identity["digest"],
+            )
+            if load.spec.kind == "sqlite":
+                self.assertIn(
+                    load.identity_mode, ("logical_content", "physical_snapshot")
+                )
+                # The run-identity digest must come from the private snapshot,
+                # never from the live main database file.
+                self.assertEqual(
+                    fingerprints[load.spec.id]["identity"]["snapshot"]["read_only"],
+                    True,
+                )
 
     def test_key_results_contain_target_hashes_and_byte_lengths(self) -> None:
         result = next(
