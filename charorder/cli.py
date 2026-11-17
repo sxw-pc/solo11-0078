@@ -54,8 +54,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = subparsers.add_parser("serve", help="以只读 HTTP 方式查看一次运行")
     serve.add_argument("--run", required=True, help="运行目录")
-    serve.add_argument("--host", default="127.0.0.1", help="仅允许回环地址")
+    serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="仅允许数值回环地址或 localhost；名称只解析一次且绝不按名称 bind",
+    )
     serve.add_argument("--port", type=int, default=8765, help="监听端口")
+    serve.add_argument(
+        "--contract",
+        choices=("pinned_endpoint", "pure_local_name"),
+        default="pinned_endpoint",
+        help=(
+            "本机名称合同：pinned_endpoint（默认）只绑定并宣传数值回环地址，"
+            "混合解析环境可启动；pure_local_name 要求 localhost 全部答复均为"
+            "回环，否则拒绝启动"
+        ),
+    )
 
     subparsers.add_parser("version", help="显示版本")
     return parser
@@ -106,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             print("SQLite integrity_check：ok · HTML 自包含：是")
             return 0
         if args.command == "serve":
-            serve_run(args.run, host=args.host, port=args.port)
+            serve_run(args.run, host=args.host, port=args.port, contract=args.contract)
             return 0
         parser.error(f"未知命令：{args.command}")
         return 2

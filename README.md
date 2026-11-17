@@ -341,13 +341,50 @@ python -m charorder run --config my-config.json --out out/gate --fail-on high
 ## 10. 只读复核服务器
 
 ```bash
+# 默认 pinned_endpoint 合同：只绑定并宣传数值回环地址
 python -m charorder serve --run out/charorder-demo --port 8765
+
+# pure_local_name 合同：先证明 localhost 全部解析为回环，再额外信任名称
+python -m charorder serve --run out/charorder-demo --host localhost \
+    --contract pure_local_name
 ```
 
-- 仅允许绑定 `127.0.0.1` / `localhost` / `::1`；
+### 10.1 两种本机名称合同
+
+复核页展示原始键与记录身份，`keys.jsonl` / `ledger.sqlite` 也在只读白名单中，
+因此已通过 `verify_run` 的证据只交给真正连到本机复核台的请求方。启动时对
+`localhost` 的 A/AAAA 解析**只进行一次**，只把经验证的数值回环地址交给
+socket `bind`，随后核对 `getsockname` 与 IPv6 dual-stack（`IPV6_V6ONLY`）状态；
+任何非回环实际监听都拒绝启动。请求处理路径上**不再做任何 DNS 解析**。
+
+| 合同 | 混合解析（localhost 同时含回环与非回环答复） | 实际端点 | 宣传 / 信任的 authority |
+| --- | --- | --- | --- |
+| `pinned_endpoint`（默认） | 可启动：忽略非回环答复，只选数值回环绑定 | 本机回环 | 仅数字 URL（`127.0.0.1:<port>` / `[::1]:<port>`） |
+| `pure_local_name` | **拒绝启动**：要求所有答复均为回环 | 本机回环 | 数字 URL + `localhost:<port>` |
+
+`pinned_endpoint` 保证“实际端点是本机”，名称永远不会直接进入 `bind`，因此
+“检查后二次解析换址”（TOCTOU）无法移动端点；`pure_local_name` 额外保证
+“被宣传名称也是本机”。两者都不允许错误 Host 或远端 peer 取得验证过的原文。
+
+### 10.2 请求授权（RFC 9112）
+
+每次 GET / HEAD / 报告 / JSONL / SQLite 读取**之前**，服务器依次验证：
+
+- TCP peer 必须是数值回环地址，非回环 peer 返回 `403`；
+- HTTP/1.1 必须有且仅有一个语法有效的 `Host`：缺失、重复（含逗号列表）、
+  userinfo、非规范 IP、缺端口 / 越界端口等返回 `400`；
+- origin-form 的 `Host`（含端口）必须在启动时保存的可信 authority 集合内，
+  错端口、攻击者域返回 `403`；
+- absolute-form（绝对 URI 请求）的 request-target authority 必须与 `Host`
+  完全一致且可信，冲突返回 `400`；
+- 授权失败的响应使用固定文案，不含 `run_id`、请求 Host、路径或任何产物原文，
+  且在授权通过前不读取运行目录中的任何文件（未授权请求零次产物读取）。
+
+其余只读约束保持不变：
+
 - 仅支持 `GET` / `HEAD`，写方法返回 `405`；
 - 仅公开运行目录白名单中的产物，路径穿越与未知文件返回 `404`；
-- 启动前先执行完整性校验；
+- 启动前先执行完整性校验（`verify_run`），篡改过的运行不会被暴露；
 - 返回 `Content-Security-Policy`、`nosniff`、`no-referrer`、`no-store`；
 - 不应把它部署到公网，也不提供任何上传或编辑入口。
 
@@ -377,7 +414,7 @@ python tools/build_demo_fixtures.py
 python -m unittest discover -s tests -v
 ```
 
-87 个标准库 `unittest` 用例覆盖：
+123 个标准库 `unittest` 用例覆盖：
 
 - 宽度折叠、NFC/NFD、casefold、不可见字符策略、空白折叠与管线顺序；
 - 不可见 / 双向 / 控制 / 替换 / 代理 / 乱码 / 空白检测；
@@ -387,7 +424,11 @@ python -m unittest discover -s tests -v
 - 计划确定性、产物哈希、源文件未被修改、SQLite 台账计数与视图；
 - 自包含 HTML、无外部资源、XSS 转义；
 - CLI 退出码、`verify` 篡改检测；
-- 只读服务器 GET/HEAD/405/404 与绑定限制。
+- 只读服务器 GET/HEAD/405/404 与绑定限制；
+- 回环绑定合同：混合解析 / 二次解析换址（TOCTOU）、IPv4/IPv6、数值地址不解析、
+  非回环监听拒绝；
+- 请求授权：Host 缺失 / 重复 / 语法错误、错端口、攻击者域、绝对 URI 与 Host
+  冲突、非回环 peer，以及未授权请求零次产物读取、错误响应不泄露 run_id 与原文。
 
 测试使用临时目录，不会修改演示 fixture。
 
