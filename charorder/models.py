@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -136,10 +138,135 @@ class KeyRule:
     required: bool = True
     max_bytes: int | None = None
     max_chars: int | None = None
+    # Candidate transforms for rule-adjustment preflight. Empty means this rule
+    # is fixed at ``transform`` and cannot be selected by the optimizer.
+    candidates: tuple[TransformSpec, ...] = ()
+    # Target table / entity namespace. Used to decide whether two records are
+    # "different entities in the same target table". Falls back to destination.
+    target_table: str = ""
 
     @property
     def composite(self) -> bool:
         return len(self.columns) > 1
+
+    @property
+    def target_unit(self) -> str:
+        return self.target_table or self.destination or self.id
+
+    @property
+    def selectable(self) -> bool:
+        return bool(self.candidates)
+
+
+@dataclass(frozen=True)
+class RecordRef:
+    """A record identity bound to one rule and one source."""
+
+    source_id: str
+    rule_id: str
+    record_ref: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "source_id": self.source_id,
+            "rule_id": self.rule_id,
+            "record_ref": self.record_ref,
+        }
+
+    def key(self) -> tuple[str, str, str]:
+        return (self.source_id, self.rule_id, self.record_ref)
+
+
+@dataclass(frozen=True)
+class AuthorizedLink:
+    """An authorized one-to-one association between two record identities."""
+
+    link_id: str
+    left: RecordRef
+    right: RecordRef
+
+
+@dataclass(frozen=True)
+class ForbiddenPair:
+    """Two cross-table records that must never share a target key."""
+
+    pair_id: str
+    left: RecordRef
+    right: RecordRef
+
+
+@dataclass(frozen=True)
+class PreflightSpec:
+    """Caller-supplied rule-adjustment constraints."""
+
+    max_combinations: int
+    authorized_links: tuple[AuthorizedLink, ...]
+    forbidden_pairs: tuple[ForbiddenPair, ...]
+    forbid_unauthorized_cross_table: bool = True
+    expected_sources_sha256: dict[str, str] = field(default_factory=dict)
+    expected_source_digest: str = ""
+    expected_rules_sha256: str = ""
+    constraint_sha256: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "max_combinations": self.max_combinations,
+            "authorized_links": [
+                {
+                    "link_id": link.link_id,
+                    "left": link.left.as_dict(),
+                    "right": link.right.as_dict(),
+                }
+                for link in self.authorized_links
+            ],
+            "forbidden_pairs": [
+                {
+                    "pair_id": pair.pair_id,
+                    "left": pair.left.as_dict(),
+                    "right": pair.right.as_dict(),
+                }
+                for pair in self.forbidden_pairs
+            ],
+            "forbid_unauthorized_cross_table": (
+                self.forbid_unauthorized_cross_table
+            ),
+            "expected_sources_sha256": dict(
+                sorted(self.expected_sources_sha256.items())
+            ),
+            "expected_source_digest": self.expected_source_digest,
+            "expected_rules_sha256": self.expected_rules_sha256,
+            "constraint_sha256": self.constraint_sha256,
+        }
+
+
+def rule_summary(rule: KeyRule) -> dict[str, Any]:
+    """Stable, order-preserving description of one rule for digest binding."""
+
+    return {
+        "id": rule.id,
+        "source_id": rule.source_id,
+        "columns": list(rule.columns),
+        "destination": rule.destination,
+        "target_table": rule.target_unit,
+        "unique": rule.unique,
+        "required": rule.required,
+        "max_bytes": rule.max_bytes,
+        "max_chars": rule.max_chars,
+        "transform": rule.transform.as_dict(),
+        "candidates": [spec.as_dict() for spec in rule.candidates],
+    }
+
+
+def rule_summary_digest(keys: tuple[KeyRule, ...] | list[KeyRule]) -> str:
+    payload = [rule_summary(rule) for rule in keys]
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -152,6 +279,7 @@ class AppConfig:
     config_sha256: str
     severity_overrides: dict[str, str] = field(default_factory=dict)
     max_report_rows: int = 500
+    preflight: PreflightSpec | None = None
 
     @property
     def source_map(self) -> dict[str, SourceSpec]:
@@ -316,3 +444,132 @@ class ScanResult:
     summary: dict[str, Any]
     verdict: str
     plan: dict[str, Any]
+    preflight: PreflightResult | None = None
+
+
+@dataclass
+class PreflightKeyEvidence:
+    """Old and new target key for one record under a candidate configuration."""
+
+    rule_id: str
+    source_id: str
+    record_ref: str
+    record_id: str | None
+    old_key: str | None
+    old_bytes: int
+    new_key: str | None
+    new_bytes: int
+    changed: bool
+    transform: TransformSpec
+    defects: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "rule_id": self.rule_id,
+            "source_id": self.source_id,
+            "record_ref": self.record_ref,
+            "record_id": self.record_id,
+            "old_key_escaped": (
+                None if self.old_key is None else self.old_key
+            ),
+            "old_bytes": self.old_bytes,
+            "new_key_escaped": (
+                None if self.new_key is None else self.new_key
+            ),
+            "new_bytes": self.new_bytes,
+            "changed": self.changed,
+            "transform": self.transform.as_dict(),
+            "defects": list(self.defects),
+        }
+
+
+@dataclass
+class PreflightEvaluation:
+    """A fully recomputed candidate configuration for one objective."""
+
+    objective: str
+    status: str
+    selected_transforms: dict[str, TransformSpec]
+    exit_code: int
+    changed_records: int
+    total_bytes: int
+    key_evidence: list[PreflightKeyEvidence]
+    checks: dict[str, Any]
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    combination_rank: int = 0
+    exhaustive: bool = True
+    proof: dict[str, Any] = field(default_factory=dict)
+    provisional: bool = False
+    examined_combinations: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "objective": self.objective,
+            "status": self.status,
+            "selected_transforms": {
+                rule_id: spec.as_dict()
+                for rule_id, spec in self.selected_transforms.items()
+            },
+            "exit_code": self.exit_code,
+            "changed_records": self.changed_records,
+            "total_bytes": self.total_bytes,
+            "combination_rank": self.combination_rank,
+            "exhaustive": self.exhaustive,
+            "provisional": self.provisional,
+            "examined_combinations": self.examined_combinations,
+            "checks": self.checks,
+            "diagnostics": self.diagnostics,
+            "proof": self.proof,
+            "keys": [item.as_dict() for item in self.key_evidence],
+        }
+
+
+@dataclass
+class PreflightResult:
+    run_id: str
+    config_sha256: str
+    source_digest: str
+    rules_sha256: str
+    constraint_digest: str
+    stale: bool
+    stale_reasons: list[str]
+    candidate_rule_ids: list[str]
+    total_combinations: int
+    examined_combinations: int
+    budget_exhausted: bool
+    candidate_order: list[dict[str, Any]]
+    objective_results: dict[str, PreflightEvaluation | None]
+    witness: dict[str, Any] | None
+    state: str
+    notes: list[str] = field(default_factory=list)
+    evidence_verified: bool = True
+    relation_summary: dict[str, Any] = field(default_factory=dict)
+    config_summary: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "kind": "charorder.preflight",
+            "run_id": self.run_id,
+            "config_sha256": self.config_sha256,
+            "source_digest": self.source_digest,
+            "rules_sha256": self.rules_sha256,
+            "constraint_digest": self.constraint_digest,
+            "stale": self.stale,
+            "stale_reasons": self.stale_reasons,
+            "state": self.state,
+            "candidate_rule_ids": self.candidate_rule_ids,
+            "total_combinations": self.total_combinations,
+            "examined_combinations": self.examined_combinations,
+            "budget_exhausted": self.budget_exhausted,
+            "candidate_order": self.candidate_order,
+            "notes": self.notes,
+            "objectives": {
+                objective: (None if evaluation is None else evaluation.as_dict())
+                for objective, evaluation in self.objective_results.items()
+            },
+            "witness": self.witness,
+            "evidence_verified": self.evidence_verified,
+            "relation_summary": self.relation_summary,
+            "config_summary": self.config_summary,
+        }

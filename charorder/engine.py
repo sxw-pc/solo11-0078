@@ -23,13 +23,12 @@ from .models import (
     SourceRecord,
 )
 from .planner import build_plan
+from .preflight import optimize as optimize_preflight
 from .transforms import (
-    UNIT_SEPARATOR,
     analyze_text,
-    apply_transform,
+    compute_target_key,
     escaped_text,
     format_raw_values,
-    has_unit_separator,
     sanitize_text,
     sha256_text,
     utf8_bytes,
@@ -302,6 +301,13 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
         verdict=verdict,
         plan={},
     )
+    result.preflight = optimize_preflight(
+        config,
+        source_loads,
+        key_results,
+        run_id=run_id,
+        config_sha256=config.config_sha256,
+    )
     result.plan = build_plan(result)
     return result
 
@@ -353,25 +359,27 @@ def _evaluate_key(
     changed = False
 
     if not missing_columns:
-        assert all(component is not None for component in raw_components)
-        components = [component for component in raw_components if component is not None]
-        transformed = [apply_transform(component, rule.transform) for component in components]
-        changed = any(before != after for before, after in zip(components, transformed))
-        for column, transformed_value in zip(rule.columns, transformed):
-            if has_unit_separator(transformed_value):
-                defects.append(
-                    Defect(
-                        code="COMPOSITE_SEPARATOR",
-                        severity=config.severity_for("COMPOSITE_SEPARATOR"),
-                        message=(
-                            "变换后的分量包含 U+001F 单元分隔符，复合键边界将产生歧义"
-                        ),
-                        details={"column": column, "codepoint": "U+001F"},
-                        column=column,
-                    )
+        computation = compute_target_key(
+            rule.columns,
+            tuple(raw_components),
+            rule.transform,
+        )
+        assert computation.target_key is not None
+        for column in computation.separator_columns:
+            defects.append(
+                Defect(
+                    code="COMPOSITE_SEPARATOR",
+                    severity=config.severity_for("COMPOSITE_SEPARATOR"),
+                    message=(
+                        "变换后的分量包含 U+001F 单元分隔符，复合键边界将产生歧义"
+                    ),
+                    details={"column": column, "codepoint": "U+001F"},
+                    column=column,
                 )
-        target_key = UNIT_SEPARATOR.join(transformed)
-        if target_key == "" or all(component == "" for component in transformed):
+            )
+        target_key = computation.target_key
+        changed = computation.changed
+        if computation.empty:
             defects.append(
                 Defect(
                     code="EMPTY_KEY",
@@ -381,12 +389,11 @@ def _evaluate_key(
                     column=rule.columns[0] if len(rule.columns) == 1 else None,
                 )
             )
-        safe_key = sanitize_text(target_key)
-        target_key = safe_key
+        safe_key = target_key
         target_escaped = escaped_text(safe_key)
         key_hash = sha256_text(safe_key)
-        key_bytes = len(utf8_bytes(safe_key))
-        key_chars = len(safe_key)
+        key_bytes = computation.key_bytes
+        key_chars = computation.key_chars
         if rule.max_bytes is not None and key_bytes > rule.max_bytes:
             defects.append(
                 Defect(

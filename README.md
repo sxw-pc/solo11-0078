@@ -89,7 +89,7 @@ charorder/
 │   └── cli.py                 # 命令行入口
 ├── fixtures/demo/             # 合成客户 / 商品 / 联系人数据
 ├── tools/build_demo_fixtures.py
-├── tests/                     # 87 个 unittest 用例
+├── tests/                     # 121 个 unittest 用例
 ├── pyproject.toml
 └── out/                       # demo 运行产物（可重建）
 ```
@@ -225,11 +225,70 @@ charorder/
 - `required`：为 `true` 时，任一分量为 `null` 即产生高等级 `REQUIRED_VALUE_MISSING`，且不参与碰撞检测。
 - `max_bytes` / `max_chars`：对变换后的 UTF-8 字节数 / 字符数设置上限，可为 `null`。
 - `destination`：仅供计划和报告展示的目标表 / 列说明，不会被执行。
+- `target_table`：可选的目标表 / 实体命名空间。两条规则共用同一 `target_table` 时，视为同一目标表中的不同实体，其目标键必须互不相同；未提供时回退为 `destination`，再回退为规则 ID。
+- `candidates`：可选的 `TransformSpec` 数组，表示该规则**允许选择**的完整候选清单（见 §5.5）。`transform` 始终作为“旧键”基线，不会被自动加入 `candidates`。
 - 空白字符串（`""` 或变换后为空）会产生 `EMPTY_KEY`，但仍然是一个可碰撞的键值。是否把空串视为非法，由业务在迁移处置中决定。
 
 ### 5.4 复合键分隔符
 
 复合键固定使用 ASCII Unit Separator `U+001F`。若某个变换后的分量本身包含该字符，会生成高等级 `COMPOSITE_SEPARATOR` 风险，避免静默产生歧义键。
+
+### 5.5 规则调整预检（关联保全）
+
+迁移后，客户、订单等不同目标表之间仍需要用文本键关联。逐表唯一并不能保证“已授权的关联仍然相等”，也不能保证“未授权的两行不会被新变换意外接上”。因此本工具提供**整组规则选择**的预检：
+
+```json
+{
+  "preflight": {
+    "max_combinations": 100000,
+    "forbid_unauthorized_cross_table": true,
+    "source_digest": "<可选：本次源快照摘要>",
+    "source_sha256": {
+      "customers": "<可选：单个源文件 SHA-256>"
+    },
+    "rules_sha256": "<可选：规则清单摘要>",
+    "authorized_links": [
+      {
+        "link_id": "customer_order_1",
+        "left": {"source_id": "customers", "rule_id": "customer_key", "record_ref": "row:2"},
+        "right": {"source_id": "orders", "rule_id": "order_customer_key", "record_ref": "row:7"}
+      }
+    ],
+    "forbidden_pairs": [
+      {
+        "pair_id": "must_differ_1",
+        "left": {"source_id": "customers", "rule_id": "customer_key", "record_ref": "row:3"},
+        "right": {"source_id": "orders", "rule_id": "order_customer_key", "record_ref": "row:8"}
+      }
+    ]
+  }
+}
+```
+
+- `candidates`：每条规则允许的完整 `TransformSpec` 清单；只有声明了 `candidates` 的规则会参与搜索，其余规则保持 `transform` 不变。
+- `authorized_links`：已授权的一对一关联边，`source_id` / `rule_id` / `record_ref` 三元组必须唯一绑定到一条记录；两边必须绑定**不同规则**（不同目标表）。
+- `forbidden_pairs`：明确要求**不得同键**的跨表记录对。
+- `forbid_unauthorized_cross_table`：默认 `true`。默认拒绝任何未在 `authorized_links` 中声明的跨目标表同键。
+- `max_combinations`：搜索预算。超过预算时只报告已验证可行的暂定组合、已检查范围与 `unknown` 最优性。
+- `source_digest` / `source_sha256` / `rules_sha256`：可选绑定值。任何一个源、源快照摘要或规则清单摘要变化，清单即判定为过期，不再给出放行结论。
+
+每组选中的规则都会在**同一批 `source_loads` 上对全部相关记录按现有变换顺序重算**，而不仅是关联边端点。所有组合共同受以下硬约束：
+
+- 每条规则原有的 `required`、`unique`、`max_bytes` / `max_chars`、保留分隔符检查继续生效；
+- 同一 `target_table` 中不同实体的目标键不得相同；
+- 授权边两端目标键 UTF-8 字节必须完全相同；
+- 禁止边及未授权的跨表记录不得同键。
+
+在全部可行整组选择中，工具分别求解两个**独立**业务目标：
+
+1. `min_changed_records`：最少改变既有目标键的记录数（“旧键”按规则原始 `transform` 重算）；
+2. `min_total_bytes`：所有相关目标键的 UTF-8 总字节数最小。
+
+两个目标可以选出不同配置；平局按候选清单顺序稳定决定。搜索若不完整，只输出 `provisional` / `unknown`，绝不称为最优、无解或放行。无可行组合时，只有在穷尽全部组合后才会给出 `no_feasible` 与可核验的冲突见证（关系、唯一性或长度）。
+
+**边界**：预检只选择整条规则的 `TransformSpec`，不合并、删除记录，不为单行指定替代键；不得借另一条目的唯一索引结果绕过本目标的整组规则选择；正式规则的 `scan` 结论仍单独保留。
+
+> 例：甲表原值 `a`、`ſ`（U+017F），候选为原样 / upper；乙表原值 `A`、`b`，候选为原样 / lower；只授权甲 `a` 与乙 `A`。`min_changed_records` 选择甲原样＋乙 lower（改变 1 条键，共 5 字节），`min_total_bytes` 选择甲 upper＋乙原样（共 4 字节，改变 2 条键）；其余两种组合关联失配。
 
 ---
 
@@ -246,6 +305,8 @@ charorder/
 | `findings.json` | 全量风险清单、严重级别和检查码计数 |
 | `collisions.json` | 全量碰撞组及参与者 |
 | `keys.jsonl` | 每条记录 × 每条规则的原始值、目标键、转义值、字节数、哈希、缺陷与碰撞组 ID |
+| `preflight.json` | 规则调整预检：状态、摘要绑定、候选顺序、两个目标的最优配置、逐记录旧新键、关联检查与最优性证明 |
+| `preflight-keys.jsonl` | 两个目标各自选中的规则下，每条相关记录的旧键、新键、字节数、变更标记与所选变换 |
 | `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members 及视图） |
 | `manifest.json` | 运行清单：产物哈希、计划哈希、源指纹、复跑命令 |
 
@@ -321,6 +382,12 @@ python -m charorder run --config my-config.json --out out/gate --fail-on high
 
 建议把“高等级发现为 0”和“碰撞组为 0”作为唯一索引创建前的硬门禁。
 
+配置了 `preflight` 时，`plan.json` 还会写入 `preflight.gate`：
+
+- 只有 `state=optimal`、两个目标均取得最优、`evidence_verified=true` 且未过期时，`clears=true`；
+- `provisional` / `unknown` / `no_feasible` / `stale` / `identity_invalid` / `constraint_invalid` 一律 `clears=false`，且不会被称为最优或无解；
+- 该门禁仅针对“规则调整建议”，不影响正式规则 `scan` 的原有结论。
+
 ---
 
 ## 9. 可复现性与完整性
@@ -331,6 +398,7 @@ python -m charorder run --config my-config.json --out out/gate --fail-on high
 - `python -m charorder verify --run <dir>` 会校验：
   - manifest 内所有产物的大小与 SHA-256；
   - `plan.json` 哈希与 `run_id`；
+  - `preflight.json` 的 `run_id`、状态与摘要绑定，以及 `preflight-keys.jsonl` 的证据条数；
   - SQLite `integrity_check`、`user_version`、行数与汇总计数；
   - HTML 为 UTF-8 自包含页面，无外部脚本 / 样式 / 图片 / `@import`；
   - manifest 声明源文件只读、无网络访问。
@@ -377,7 +445,7 @@ python tools/build_demo_fixtures.py
 python -m unittest discover -s tests -v
 ```
 
-87 个标准库 `unittest` 用例覆盖：
+121 个标准库 `unittest` 用例覆盖：
 
 - 宽度折叠、NFC/NFD、casefold、不可见字符策略、空白折叠与管线顺序；
 - 不可见 / 双向 / 控制 / 替换 / 代理 / 乱码 / 空白检测；
@@ -387,7 +455,8 @@ python -m unittest discover -s tests -v
 - 计划确定性、产物哈希、源文件未被修改、SQLite 台账计数与视图；
 - 自包含 HTML、无外部资源、XSS 转义；
 - CLI 退出码、`verify` 篡改检测；
-- 只读服务器 GET/HEAD/405/404 与绑定限制。
+- 只读服务器 GET/HEAD/405/404 与绑定限制；
+- 规则调整预检：两个独立目标的最优解与取舍、逐记录证据与直接重算一致、整组重算后的本表碰撞 / 超长 / 必需值缺失、过期与歧义身份、平局、无解见证、预算耗尽与 `unknown`、配置 / 计划 / 报告 / SQLite 台账一致性。
 
 测试使用临时目录，不会修改演示 fixture。
 
@@ -401,6 +470,9 @@ python -m unittest discover -s tests -v
 - 大小写映射基于运行时 Python 的 Unicode 数据，不使用数据库 collation 或系统 locale。运行 ID 包含 Unicode 版本。
 - 碰撞检测按 UTF-8 二进制键精确分组；不提供模糊匹配、编辑距离、拼音或语音近似。
 - 不自动判断哪个碰撞参与者应保留；不会自动合并、删除、修复乱码或改写源数据。
+- 规则调整预检只穷尽调用方声明的有限候选清单；`max_combinations` 之外的空间视为未检查，最优性标为 `unknown`。
+- 授权关联与禁止同键清单必须由调用方提供并保证来源合法；工具只验证记录身份可解析且一对一，不推断业务关联。
+- 预检的两个目标（最少改键、最小字节）是独立优化的，可能给出不同配置；工具不把任一目标的最优解冒充为另一目标的最优解。
 - SQLite 台账和报告会包含原始值及部分上下文，仅适合在受控本地环境处理合成或已获授权的数据。
 
 ---

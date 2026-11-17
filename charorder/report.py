@@ -26,6 +26,56 @@ _STATUS_LABEL = {
 }
 
 
+def _preflight_state_label(state: str) -> str:
+    return {
+        "optimal": "可证最优",
+        "provisional": "暂定 / 最优性 unknown",
+        "unknown": "unknown",
+        "no_feasible": "无可行组合",
+        "stale": "清单过期",
+        "identity_invalid": "身份无效",
+        "constraint_invalid": "约束自相矛盾",
+        "not_configured": "未启用",
+    }.get(state, state)
+
+
+def _preflight_rows(result: ScanResult) -> list[dict[str, Any]]:
+    preflight = result.preflight
+    if preflight is None:
+        return []
+    rows = []
+    for objective, evaluation in preflight.objective_results.items():
+        if evaluation is None:
+            rows.append(
+                {
+                    "objective": objective,
+                    "status": None,
+                    "changed_records": None,
+                    "total_bytes": None,
+                    "provisional": None,
+                    "selected": {},
+                    "exit_code": None,
+                    "checks": {},
+                    "proof": {},
+                }
+            )
+            continue
+        rows.append(
+            {
+                "objective": objective,
+                "status": evaluation.status,
+                "changed_records": evaluation.changed_records,
+                "total_bytes": evaluation.total_bytes,
+                "provisional": evaluation.provisional,
+                "selected": evaluation.selected_transforms,
+                "exit_code": evaluation.exit_code,
+                "checks": evaluation.checks,
+                "proof": evaluation.proof,
+            }
+        )
+    return rows
+
+
 def _e(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
@@ -205,6 +255,8 @@ def render_markdown(result: ScanResult) -> str:
         lines.append("")
         lines.append(f"**验收条件：** {step['acceptance']}")
         lines.append("")
+
+    lines.extend(_render_preflight_markdown(result))
     lines.extend(
         [
             "## 复现与边界",
@@ -217,6 +269,244 @@ def render_markdown(result: ScanResult) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _render_preflight_markdown(result: ScanResult) -> list[str]:
+    preflight = result.preflight
+    if preflight is None:
+        return []
+    lines: list[str] = [
+        "",
+        "## 规则调整预检（关联保全）",
+        "",
+        f"- 状态：**{_preflight_state_label(preflight.state)}**",
+        f"- 配置 SHA-256：`{preflight.config_sha256}`",
+        f"- 源摘要：`{preflight.source_digest}`",
+        f"- 规则摘要：`{preflight.rules_sha256}`",
+        f"- 约束摘要：`{preflight.constraint_digest}`",
+        f"- 清单过期：**{'是' if preflight.stale else '否'}**",
+        f"- 候选组合：已检查 **{preflight.examined_combinations}** / 共 **{preflight.total_combinations}**；"
+        f"预算耗尽：**{'是' if preflight.budget_exhausted else '否'}**",
+        f"- 证据复算：**{'通过' if preflight.evidence_verified else '失败'}**",
+    ]
+    if preflight.stale_reasons:
+        lines.append("- 过期原因：")
+        lines.extend(f"  - {_md(reason)}" for reason in preflight.stale_reasons)
+    for note in preflight.notes:
+        lines.append(f"- {_md(note)}")
+    lines.append("")
+    if not preflight.stale and preflight.state not in {
+        "identity_invalid",
+        "constraint_invalid",
+    }:
+        lines.extend(
+            [
+                "| 目标 | 状态 | 改变键数 | 总字节 | 可证最优 | 导出码 | 选中规则 |",
+                "|---|---|---:|---:|---|---:|---|",
+            ]
+        )
+        for row in _preflight_rows(result):
+            if row["status"] is None:
+                lines.append(
+                    f"| {_md(row['objective'])} | 无可行组合 | — | — | — | — | — |"
+                )
+                continue
+            selected = ", ".join(
+                f"{rule_id}={spec.case}" for rule_id, spec in row["selected"].items()
+            )
+            lines.append(
+                f"| {_md(row['objective'])} | {_md(row['status'])} | "
+                f"{row['changed_records']} | {row['total_bytes']} | "
+                f"{'是' if not row['provisional'] else '**unknown**'} | "
+                f"{row['exit_code']} | {_md_code(selected or '—')} |"
+            )
+        lines.append("")
+        lines.append("### 逐记录旧新键（主推荐：最少改变键）")
+        lines.append("")
+        primary = preflight.objective_results.get("min_changed_records")
+        if primary is None:
+            lines.append("无已验证的主推荐配置。")
+        else:
+            lines.extend(
+                [
+                    "| 规则 | 记录 | 旧键 | 新键 | 旧字节 | 新字节 | 变更 | 选中变换 |",
+                    "|---|---|---|---|---:|---:|---|---|",
+                ]
+            )
+            for item in primary.key_evidence:
+                lines.append(
+                    f"| {_md(item.rule_id)} | {_md(item.record_ref)} | "
+                    f"{_md_code(item.old_key if item.old_key is not None else '∅')} | "
+                    f"{_md_code(item.new_key if item.new_key is not None else '∅')} | "
+                    f"{item.old_bytes} | {item.new_bytes} | "
+                    f"{'是' if item.changed else '否'} | "
+                    f"{_md(item.transform.describe())} |"
+                )
+            relations = primary.checks.get("relations", {})
+            lines.append("")
+            lines.append(
+                "- 已授权关联全等：**{}**；禁止同键对全部避开：**{}**；"
+                "未授权跨表同键拦截：**{}**".format(
+                    "是" if relations.get("authorized_links_satisfied") else "否",
+                    "是" if relations.get("forbidden_pairs_clear") else "否",
+                    "开启"
+                    if relations.get("forbid_unauthorized_cross_table")
+                    else "关闭",
+                )
+            )
+            lines.append(
+                f"- 最优性证明：`{primary.proof.get('optimality', 'unknown')}`；"
+                f"已检查组合 {primary.proof.get('examined_combinations')} / "
+                f"{primary.proof.get('total_combinations')}；"
+                f"平局规则 `{primary.proof.get('tie_break')}`。"
+            )
+    if preflight.witness:
+        lines.extend(["", "### 冲突见证", ""])
+        categories = preflight.witness.get("categories", {})
+        for code, item in sorted(categories.items()):
+            lines.append(
+                f"- `{_md(code)}`：{_md(item.get('message', ''))} "
+                f"（组合序号 {item.get('combination_rank')}）"
+            )
+        if preflight.witness.get("note"):
+            lines.append(f"- 说明：{_md(preflight.witness['note'])}")
+    lines.append("")
+    return lines
+
+
+def _render_preflight_plan_markdown(preflight_plan: dict[str, Any]) -> list[str]:
+    lines = [
+        "",
+        "## 规则调整预检",
+        "",
+        f"- 状态：**{_preflight_state_label(preflight_plan.get('state', ''))}**",
+        f"- 配置 SHA-256：`{preflight_plan.get('config_sha256')}`",
+        f"- 源摘要：`{preflight_plan.get('source_digest')}`",
+        f"- 约束摘要：`{preflight_plan.get('constraint_digest')}`",
+        f"- 组合：`{preflight_plan.get('examined_combinations')}` / "
+        f"`{preflight_plan.get('total_combinations')}`",
+        "",
+        "| 目标 | 状态 | 改变键数 | 总字节 | 选中变换 | 最优性 |",
+        "|---|---|---:|---:|---|---|",
+    ]
+    for objective, item in preflight_plan.get("objectives", {}).items():
+        if item is None:
+            lines.append(f"| {_md(objective)} | 无 | — | — | — | — |")
+            continue
+        selected = ", ".join(
+            f"{rule_id}={spec.get('case')}"
+            for rule_id, spec in item.get("selected_transforms", {}).items()
+        )
+        lines.append(
+            f"| {_md(objective)} | {_md(item.get('status'))} | "
+            f"{item.get('changed_records')} | {item.get('total_bytes')} | "
+            f"{_md_code(selected or '—')} | "
+            f"{_md(item.get('proof', {}).get('optimality'))} |"
+        )
+    recommended = preflight_plan.get("recommended", {})
+    gate = preflight_plan.get("gate", {})
+    lines.extend(
+        [
+            "",
+            f"- 推荐配置（最少改变键）：`{recommended.get('status')}`；"
+            f"放行口径：`{recommended.get('clearance')}`",
+            "- 预检只选择整条规则变换；正式规则的 scan 结论仍单独保留。",
+        ]
+    )
+    if gate:
+        lines.append(
+            f"- 预检门禁：**{'通过' if gate.get('clears') else '未通过'}** — "
+            f"{_md(gate.get('reason', ''))}"
+        )
+    for note in preflight_plan.get("notes", []):
+        lines.append(f"- {_md(note)}")
+    lines.append("")
+    return lines
+
+
+def _render_preflight_html(result: ScanResult) -> str:
+    preflight = result.preflight
+    if preflight is None:
+        return ""
+    state_label = _preflight_state_label(preflight.state)
+    summary_rows = "\n".join(
+        f"""
+        <tr>
+          <td class="mono">{_e(row['objective'])}</td>
+          <td><span class="status status-{'ready' if row['status'] == 'optimal' else 'review'}">{_e(row['status'] or '—')}</span></td>
+          <td class="num">{'' if row['changed_records'] is None else row['changed_records']}</td>
+          <td class="num">{'' if row['total_bytes'] is None else row['total_bytes']}</td>
+          <td>{_e('是' if row['provisional'] is False else ('unknown' if row['provisional'] else '—'))}</td>
+          <td class="mono small">{_e(', '.join(f'{rule_id}={spec.case}' for rule_id, spec in row['selected'].items()) or '—')}</td>
+        </tr>"""
+        for row in _preflight_rows(result)
+    )
+    key_rows = []
+    primary = preflight.objective_results.get("min_changed_records")
+    if primary is not None:
+        for item in primary.key_evidence[:500]:
+            key_rows.append(
+                f"""
+        <tr>
+          <td class="mono">{_e(item.rule_id)}</td>
+          <td class="mono">{_e(item.record_ref)}</td>
+          <td class="mono value-cell">{_e(item.old_key if item.old_key is not None else '∅')}</td>
+          <td class="mono value-cell">{_e(item.new_key if item.new_key is not None else '∅')}</td>
+          <td class="num">{item.old_bytes}</td>
+          <td class="num">{item.new_bytes}</td>
+          <td>{_e('是' if item.changed else '否')}</td>
+        </tr>"""
+            )
+    if not key_rows:
+        key_rows.append(
+            '<tr><td colspan="7" class="muted">没有可展示的已验证逐键证据。</td></tr>'
+        )
+    witness_html = ""
+    if preflight.witness:
+        items = "".join(
+            f"<li><code>{_e(code)}</code>：{_e(item.get('message', ''))}</li>"
+            for code, item in sorted(preflight.witness.get("categories", {}).items())
+        )
+        note = _e(preflight.witness.get("note", ""))
+        witness_html = f'<div class="panel"><h3>冲突见证</h3><ul>{items}</ul><p class="note">{note}</p></div>'
+    notes_html = "".join(f"<li>{_e(note)}</li>" for note in preflight.notes)
+    return f"""
+  <section class="section" id="preflight">
+    <div class="section-head"><h2>规则调整预检 · 关联保全</h2><p>整组规则选择，非逐行改键</p></div>
+    <div class="panel">
+      <p class="note">
+        状态：<strong>{_e(state_label)}</strong> · 清单过期：
+        <strong>{'是' if preflight.stale else '否'}</strong> · 证据复算：
+        <strong>{'通过' if preflight.evidence_verified else '失败'}</strong> ·
+        组合 {preflight.examined_combinations} / {preflight.total_combinations}
+        · 预算耗尽：<strong>{'是' if preflight.budget_exhausted else '否'}</strong>
+      </p>
+      <div class="run-meta">
+        <span>配置 <code>{_e(preflight.config_sha256[:20])}…</code></span>
+        <span>源摘要 <code>{_e(preflight.source_digest[:20])}…</code></span>
+        <span>约束摘要 <code>{_e(preflight.constraint_digest[:20])}…</code></span>
+      </div>
+      <ul class="note">{notes_html}</ul>
+      <div class="table-scroll" style="margin-top:12px">
+        <table>
+          <thead><tr><th>目标</th><th>状态</th><th>改变键数</th><th>总字节</th><th>可证最优</th><th>选中规则</th></tr></thead>
+          <tbody>{summary_rows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h3>逐记录旧新键（主推荐：最少改变键）</h3>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>规则</th><th>记录</th><th>旧键</th><th>新键</th><th>旧字节</th><th>新字节</th><th>变更</th></tr></thead>
+          <tbody>{''.join(key_rows)}</tbody>
+        </table>
+      </div>
+      <p class="note">完整证据见 <code>preflight.json</code>、<code>preflight-keys.jsonl</code> 与台账 preflight_* 表。正式规则的 scan 结论仍单独保留。</p>
+    </div>
+    {witness_html}
+  </section>
+"""
 
 
 def render_plan_markdown(result: ScanResult) -> str:
@@ -290,6 +580,9 @@ def render_plan_markdown(result: ScanResult) -> str:
                 "",
             ]
         )
+    preflight_plan = plan.get("preflight")
+    if preflight_plan:
+        lines.extend(_render_preflight_plan_markdown(preflight_plan))
     if plan.get("steps"):
         examples = plan["steps"][3].get("examples", [])
         if examples:
@@ -426,6 +719,8 @@ def render_html(result: ScanResult) -> str:
             f"其余 {len(result.collisions) - collision_cap} 组见 "
             f"<code>collisions.json</code> 与 SQLite 台账。</p>"
         )
+
+    preflight_section = _render_preflight_html(result)
 
     severity_options = "\n".join(
         f'<option value="{_e(severity)}">{_e(SEVERITY_LABEL[severity])}</option>'
@@ -838,6 +1133,8 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
     {''.join(collision_cards)}
     {collision_more}
   </section>
+
+  {preflight_section}
 
   <section class="section" id="findings">
     <div class="section-head"><h2>风险清单</h2><p>全量明细见 findings.json 与 SQLite 台账</p></div>

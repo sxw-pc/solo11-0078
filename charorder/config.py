@@ -15,14 +15,27 @@ from .models import (
     DEFAULT_SEVERITIES,
     SEVERITIES,
     AppConfig,
+    AuthorizedLink,
+    ForbiddenPair,
     KeyRule,
+    PreflightSpec,
     ProjectSpec,
+    RecordRef,
     SourceSpec,
     TransformSpec,
+    rule_summary_digest,
 )
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_TOP_LEVEL = {"version", "project", "sources", "keys", "severity_overrides", "reports"}
+_TOP_LEVEL = {
+    "version",
+    "project",
+    "sources",
+    "keys",
+    "severity_overrides",
+    "reports",
+    "preflight",
+}
 _PROJECT_FIELDS = {"name", "target", "description"}
 _SOURCE_FIELDS = {
     "id",
@@ -41,7 +54,9 @@ _KEY_FIELDS = {
     "source",
     "columns",
     "transform",
+    "candidates",
     "destination",
+    "target_table",
     "description",
     "unique",
     "required",
@@ -57,6 +72,16 @@ _TRANSFORM_FIELDS = {
     "invisible",
 }
 _REPORT_FIELDS = {"max_report_rows"}
+_PREFLIGHT_FIELDS = {
+    "max_combinations",
+    "authorized_links",
+    "forbidden_pairs",
+    "forbid_unauthorized_cross_table",
+    "source_sha256",
+    "source_digest",
+    "rules_sha256",
+}
+_REF_FIELDS = {"source_id", "rule_id", "record_ref"}
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -157,6 +182,28 @@ def load_config(path: str | Path) -> AppConfig:
     ):
         raise ConfigError("reports.max_report_rows 必须是 1..100000 的整数。")
 
+    preflight = _parse_preflight(
+        data.get("preflight"), keys, source_by_id
+    )
+    if preflight is not None:
+        if not any(key.selectable for key in keys):
+            raise ConfigError(
+                "preflight 已声明，但没有任何 keys 提供 candidates；"
+                "规则调整预检至少需要一条可选规则。"
+            )
+        preflight = PreflightSpec(
+            max_combinations=preflight.max_combinations,
+            authorized_links=preflight.authorized_links,
+            forbidden_pairs=preflight.forbidden_pairs,
+            forbid_unauthorized_cross_table=(
+                preflight.forbid_unauthorized_cross_table
+            ),
+            expected_sources_sha256=preflight.expected_sources_sha256,
+            expected_source_digest=preflight.expected_source_digest,
+            expected_rules_sha256=preflight.expected_rules_sha256,
+            constraint_sha256=_preflight_digest(keys, preflight),
+        )
+
     return AppConfig(
         version=1,
         project=project,
@@ -166,6 +213,7 @@ def load_config(path: str | Path) -> AppConfig:
         config_sha256=hashlib.sha256(raw).hexdigest(),
         severity_overrides=severity_overrides,
         max_report_rows=max_report_rows,
+        preflight=preflight,
     )
 
 
@@ -267,7 +315,14 @@ def _parse_key(item: Any, index: int) -> KeyRule:
         raise ConfigError(f"{where}.columns 不能包含重复列。")
 
     transform = _parse_transform(obj.get("transform", {}), f"{where}.transform")
+    # ``candidates`` is the complete allowed set; the caller must include the
+    # original transform if it is meant to remain selectable. The original
+    # transform is still used as the "old key" baseline for change counting.
+    candidates = _parse_candidates(obj.get("candidates"), f"{where}.candidates")
     destination = _optional_str(obj.get("destination", ""), f"{where}.destination")
+    target_table = _optional_str(
+        obj.get("target_table", ""), f"{where}.target_table"
+    ).strip()
     description = _optional_str(obj.get("description", ""), f"{where}.description")
     unique = _optional_bool(obj.get("unique", False), f"{where}.unique")
     required = _optional_bool(obj.get("required", True), f"{where}.required")
@@ -287,6 +342,8 @@ def _parse_key(item: Any, index: int) -> KeyRule:
         required=required,
         max_bytes=max_bytes,
         max_chars=max_chars,
+        candidates=candidates,
+        target_table=target_table,
     )
 
 
@@ -325,6 +382,195 @@ def _parse_transform(item: Any, where: str) -> TransformSpec:
         collapse_whitespace=collapse,
         invisible=invisible,
     )
+
+
+def _parse_candidates(item: Any, where: str) -> tuple[TransformSpec, ...]:
+    if item is None:
+        return ()
+    if not isinstance(item, list) or not item:
+        raise ConfigError(f"{where} 必须是非空 TransformSpec 数组。")
+    candidates: list[TransformSpec] = []
+    seen: set[tuple[Any, ...]] = set()
+    for index, entry in enumerate(item):
+        spec = _parse_transform(entry, f"{where}[{index}]")
+        signature = _transform_signature(spec)
+        if signature in seen:
+            raise ConfigError(f"{where} 含重复候选（索引 {index}）。")
+        seen.add(signature)
+        candidates.append(spec)
+    return tuple(candidates)
+
+
+def _transform_signature(spec: TransformSpec) -> tuple[Any, ...]:
+    return (
+        spec.normalization,
+        spec.case,
+        spec.width_fold,
+        spec.trim,
+        spec.collapse_whitespace,
+        spec.invisible,
+    )
+
+
+def _parse_preflight(
+    item: Any,
+    keys: list[KeyRule],
+    source_by_id: dict[str, SourceSpec],
+) -> PreflightSpec | None:
+    if item is None:
+        return None
+    obj = _require_object(item, "preflight")
+    _reject_unknown(obj, _PREFLIGHT_FIELDS, "preflight")
+
+    max_combinations = obj.get("max_combinations", 100_000)
+    if (
+        isinstance(max_combinations, bool)
+        or not isinstance(max_combinations, int)
+        or max_combinations <= 0
+    ):
+        raise ConfigError("preflight.max_combinations 必须是正整数。")
+
+    forbid_unauthorized = _optional_bool(
+        obj.get("forbid_unauthorized_cross_table", True),
+        "preflight.forbid_unauthorized_cross_table",
+    )
+
+    source_sha_obj = obj.get("source_sha256", {})
+    if not isinstance(source_sha_obj, dict):
+        raise ConfigError("preflight.source_sha256 必须是对象。")
+    expected_sources: dict[str, str] = {}
+    for source_id, digest in source_sha_obj.items():
+        if source_id not in source_by_id:
+            raise ConfigError(
+                f"preflight.source_sha256 引用了不存在的源：{source_id}"
+            )
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in digest.lower())
+        ):
+            raise ConfigError(
+                f"preflight.source_sha256.{source_id} 必须是 64 位十六进制 SHA-256。"
+            )
+        expected_sources[str(source_id)] = digest.lower()
+
+    expected_digest = _optional_str(
+        obj.get("source_digest", ""), "preflight.source_digest"
+    ).strip().lower()
+    if expected_digest and (
+        len(expected_digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in expected_digest)
+    ):
+        raise ConfigError(
+            "preflight.source_digest 必须是 64 位十六进制 SHA-256。"
+        )
+
+    expected_rules = _optional_str(
+        obj.get("rules_sha256", ""), "preflight.rules_sha256"
+    ).strip().lower()
+    if expected_rules and (
+        len(expected_rules) != 64
+        or any(ch not in "0123456789abcdef" for ch in expected_rules)
+    ):
+        raise ConfigError(
+            "preflight.rules_sha256 必须是 64 位十六进制 SHA-256。"
+        )
+
+    rule_map = {key.id: key for key in keys}
+    links_obj = obj.get("authorized_links", [])
+    if not isinstance(links_obj, list):
+        raise ConfigError("preflight.authorized_links 必须是数组。")
+    links: list[AuthorizedLink] = []
+    seen_link_ids: set[str] = set()
+    for index, entry in enumerate(links_obj):
+        where = f"preflight.authorized_links[{index}]"
+        link_obj = _require_object(entry, where)
+        _reject_unknown(link_obj, {"link_id", "left", "right"}, where)
+        link_id = _require_id(link_obj.get("link_id"), f"{where}.link_id")
+        if link_id in seen_link_ids:
+            raise ConfigError(f"{where}.link_id 重复：{link_id}")
+        seen_link_ids.add(link_id)
+        left = _parse_record_ref(link_obj.get("left"), f"{where}.left", rule_map, source_by_id)
+        right = _parse_record_ref(
+            link_obj.get("right"), f"{where}.right", rule_map, source_by_id
+        )
+        if left.rule_id == right.rule_id:
+            raise ConfigError(
+                f"{where} 两侧必须绑定不同规则（不同目标表）：{left.rule_id}"
+            )
+        if left.key() == right.key():
+            raise ConfigError(f"{where} 两侧不能指向同一记录。")
+        links.append(AuthorizedLink(link_id=link_id, left=left, right=right))
+
+    pairs_obj = obj.get("forbidden_pairs", [])
+    if not isinstance(pairs_obj, list):
+        raise ConfigError("preflight.forbidden_pairs 必须是数组。")
+    pairs: list[ForbiddenPair] = []
+    seen_pair_ids: set[str] = set()
+    for index, entry in enumerate(pairs_obj):
+        where = f"preflight.forbidden_pairs[{index}]"
+        pair_obj = _require_object(entry, where)
+        _reject_unknown(pair_obj, {"pair_id", "left", "right"}, where)
+        pair_id = _require_id(pair_obj.get("pair_id"), f"{where}.pair_id")
+        if pair_id in seen_pair_ids:
+            raise ConfigError(f"{where}.pair_id 重复：{pair_id}")
+        seen_pair_ids.add(pair_id)
+        left = _parse_record_ref(pair_obj.get("left"), f"{where}.left", rule_map, source_by_id)
+        right = _parse_record_ref(
+            pair_obj.get("right"), f"{where}.right", rule_map, source_by_id
+        )
+        if left.rule_id == right.rule_id:
+            raise ConfigError(
+                f"{where} 必须是跨目标表记录对，两侧规则不能相同：{left.rule_id}"
+            )
+        pairs.append(ForbiddenPair(pair_id=pair_id, left=left, right=right))
+
+    return PreflightSpec(
+        max_combinations=max_combinations,
+        authorized_links=tuple(links),
+        forbidden_pairs=tuple(pairs),
+        forbid_unauthorized_cross_table=forbid_unauthorized,
+        expected_sources_sha256=expected_sources,
+        expected_source_digest=expected_digest,
+        expected_rules_sha256=expected_rules,
+    )
+
+
+def _parse_record_ref(
+    item: Any,
+    where: str,
+    rule_map: dict[str, KeyRule],
+    source_by_id: dict[str, SourceSpec],
+) -> RecordRef:
+    obj = _require_object(item, where)
+    _reject_unknown(obj, _REF_FIELDS, where)
+    source_id = _require_id(obj.get("source_id"), f"{where}.source_id")
+    rule_id = _require_id(obj.get("rule_id"), f"{where}.rule_id")
+    record_ref = _require_nonempty_str(obj.get("record_ref"), f"{where}.record_ref")
+    if source_id not in source_by_id:
+        raise ConfigError(f"{where}.source_id 指向不存在的源：{source_id}")
+    rule = rule_map.get(rule_id)
+    if rule is None:
+        raise ConfigError(f"{where}.rule_id 指向不存在的规则：{rule_id}")
+    if rule.source_id != source_id:
+        raise ConfigError(
+            f"{where}.source_id 与规则 {rule_id} 的源不一致："
+            f"{source_id} != {rule.source_id}"
+        )
+    return RecordRef(source_id=source_id, rule_id=rule_id, record_ref=record_ref)
+
+
+def _preflight_digest(keys: list[KeyRule], preflight: PreflightSpec) -> str:
+    payload = {
+        "rules_sha256": rule_summary_digest(keys),
+        "selectable_rules": [key.id for key in keys if key.selectable],
+        "preflight": preflight.as_dict(),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 
 def _reject_unknown(obj: dict[str, Any], allowed: set[str], where: str) -> None:

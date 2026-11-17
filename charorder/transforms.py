@@ -111,6 +111,75 @@ def make_target_key(components: list[str], spec: TransformSpec) -> str:
     return UNIT_SEPARATOR.join(transformed)
 
 
+@dataclass(frozen=True)
+class KeyComputation:
+    """One target-key calculation shared by the engine and the preflight.
+
+    ``missing_columns`` lists columns whose raw value is ``None``. When any are
+    present, ``target_key`` is ``None`` and the caller decides whether that is a
+    hard failure (``required``).
+    """
+
+    missing_columns: tuple[str, ...]
+    target_key: str | None
+    key_bytes: int
+    key_chars: int
+    changed: bool
+    separator_columns: tuple[str, ...]
+    empty: bool
+
+    @property
+    def computed(self) -> bool:
+        return self.target_key is not None or not self.missing_columns
+
+
+def compute_target_key(
+    columns: tuple[str, ...],
+    raw_values: tuple[str | None, ...],
+    spec: TransformSpec,
+) -> KeyComputation:
+    """Apply the fixed pipeline to every component, in the declared order.
+
+    This is the single source of truth for target-key construction. The engine
+    and the rule-adjustment preflight both call it so that a candidate
+    ``TransformSpec`` is always evaluated identically to the live scan.
+    """
+
+    missing = tuple(
+        column
+        for column, value in zip(columns, raw_values)
+        if value is None
+    )
+    if missing:
+        return KeyComputation(
+            missing_columns=missing,
+            target_key=None,
+            key_bytes=0,
+            key_chars=0,
+            changed=False,
+            separator_columns=(),
+            empty=False,
+        )
+    components = [str(value) for value in raw_values if value is not None]
+    transformed = [apply_transform(component, spec) for component in components]
+    changed = any(before != after for before, after in zip(components, transformed))
+    separator_columns = tuple(
+        column
+        for column, value in zip(columns, transformed)
+        if has_unit_separator(value)
+    )
+    target_key = sanitize_text(UNIT_SEPARATOR.join(transformed))
+    return KeyComputation(
+        missing_columns=(),
+        target_key=target_key,
+        key_bytes=len(utf8_bytes(target_key)),
+        key_chars=len(target_key),
+        changed=changed,
+        separator_columns=separator_columns,
+        empty=target_key == "" or all(value == "" for value in transformed),
+    )
+
+
 def has_unit_separator(value: str) -> bool:
     return UNIT_SEPARATOR in value
 

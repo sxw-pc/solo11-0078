@@ -211,7 +211,7 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
         },
     ]
 
-    return {
+    plan = {
         "schema_version": 1,
         "kind": "charorder.migration_plan",
         "app": APP_NAME,
@@ -281,4 +281,146 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 "--fail-on high"
             ),
         },
+    }
+    if result.preflight is not None:
+        plan["preflight"] = _preflight_plan(result)
+        plan["preflight_gate"] = _preflight_gate(result)
+    return plan
+
+
+def _preflight_gate(result: "ScanResult") -> dict[str, Any]:
+    preflight = result.preflight
+    assert preflight is not None
+    if preflight.stale:
+        return {
+            "clears": False,
+            "state": preflight.state,
+            "reason": "预检清单已过期，不构成放行依据。",
+        }
+    if preflight.state in {"identity_invalid", "constraint_invalid"}:
+        return {
+            "clears": False,
+            "state": preflight.state,
+            "reason": "关联身份或约束清单无效，不构成放行依据。",
+        }
+    if preflight.state == "no_feasible":
+        return {
+            "clears": False,
+            "state": preflight.state,
+            "reason": "候选中没有满足全部硬约束的整组规则，不得放行。",
+        }
+    if preflight.budget_exhausted:
+        return {
+            "clears": False,
+            "state": preflight.state,
+            "reason": "搜索预算耗尽，最优性 unknown，不得宣称最优或放行。",
+        }
+    if not preflight.evidence_verified:
+        return {
+            "clears": False,
+            "state": preflight.state,
+            "reason": "逐记录键证据复算未通过，不得放行。",
+        }
+    if preflight.state != "optimal" or any(
+        evaluation is None
+        for evaluation in preflight.objective_results.values()
+    ):
+        return {
+            "clears": False,
+            "state": preflight.state,
+            "reason": "两个业务目标未同时取得可证最优解，不得放行。",
+        }
+    return {
+        "clears": True,
+        "state": preflight.state,
+        "reason": (
+            "规则调整预检已穷尽候选，两个目标均有可证最优解，且关联/唯一/长度"
+            "硬约束全部成立；仍须按计划在影子库复核后才能切换。"
+        ),
+    }
+
+
+def _preflight_plan(result: "ScanResult") -> dict[str, Any]:
+    preflight = result.preflight
+    assert preflight is not None
+    objectives: dict[str, Any] = {}
+    recommended: dict[str, Any] = {}
+    for objective, evaluation in preflight.objective_results.items():
+        if evaluation is None:
+            objectives[objective] = None
+            continue
+        objectives[objective] = {
+            "status": evaluation.status,
+            "exit_code": evaluation.exit_code,
+            "provisional": evaluation.provisional,
+            "exhaustive": evaluation.exhaustive,
+            "changed_records": evaluation.changed_records,
+            "total_bytes": evaluation.total_bytes,
+            "selected_transforms": {
+                rule_id: spec.as_dict()
+                for rule_id, spec in evaluation.selected_transforms.items()
+            },
+            "combination_rank": evaluation.combination_rank,
+            "checks": evaluation.checks,
+            "proof": evaluation.proof,
+        }
+        recommended[objective] = evaluation
+
+    # The "safest" recommendation is the fewest-changed-keys optimum: it is the
+    # configuration that alters the fewest existing keys while satisfying all
+    # relation constraints.
+    primary = recommended.get("min_changed_records")
+    return {
+        "state": preflight.state,
+        "stale": preflight.stale,
+        "stale_reasons": preflight.stale_reasons,
+        "notes": preflight.notes,
+        "run_id": preflight.run_id,
+        "config_sha256": preflight.config_sha256,
+        "source_digest": preflight.source_digest,
+        "rules_sha256": preflight.rules_sha256,
+        "constraint_digest": preflight.constraint_digest,
+        "evidence_verified": preflight.evidence_verified,
+        "candidate_rule_ids": preflight.candidate_rule_ids,
+        "candidate_order": preflight.candidate_order,
+        "total_combinations": preflight.total_combinations,
+        "examined_combinations": preflight.examined_combinations,
+        "budget_exhausted": preflight.budget_exhausted,
+        "objectives": objectives,
+        "witness": preflight.witness,
+        "recommended": {
+            "objective": "min_changed_records",
+            "status": (
+                None if primary is None else primary.status
+            ),
+            "clearance": (
+                "not_cleared"
+                if primary is None
+                or primary.provisional
+                or primary.status != "optimal"
+                else "advisory_only"
+            ),
+            "rules": (
+                {}
+                if primary is None
+                else {
+                    rule_id: spec.as_dict()
+                    for rule_id, spec in primary.selected_transforms.items()
+                }
+            ),
+            "changed_records": None if primary is None else primary.changed_records,
+            "total_bytes": None if primary is None else primary.total_bytes,
+            "keys": (
+                []
+                if primary is None
+                else [item.as_dict() for item in primary.key_evidence]
+            ),
+        },
+        "relation_summary": preflight.relation_summary,
+        "gate": _preflight_gate(result),
+        "forbidden_actions": [
+            "预检只选择整条规则的 TransformSpec，不合并、删除记录或为单行指定替代键",
+            "不得用另一个目标的唯一索引结果替代本目标的整组规则选择",
+            "unknown / provisional 结果不得作为迁移放行结论",
+        ],
     }

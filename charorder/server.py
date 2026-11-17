@@ -18,6 +18,8 @@ _ALLOWED_FILES = {
     "findings.json": "application/json; charset=utf-8",
     "collisions.json": "application/json; charset=utf-8",
     "keys.jsonl": "application/x-ndjson; charset=utf-8",
+    "preflight.json": "application/json; charset=utf-8",
+    "preflight-keys.jsonl": "application/x-ndjson; charset=utf-8",
     "ledger.sqlite": "application/vnd.sqlite3",
     "manifest.json": "application/json; charset=utf-8",
 }

@@ -19,6 +19,8 @@ _REQUIRED_ARTIFACTS = {
     "findings.json",
     "collisions.json",
     "keys.jsonl",
+    "preflight.json",
+    "preflight-keys.jsonl",
     "ledger.sqlite",
 }
 _EXTERNAL_ASSET_PATTERNS = (
@@ -110,6 +112,7 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
         plan = {}
 
     ledger_summary = _verify_ledger(root, manifest, errors)
+    _verify_preflight(root, manifest, errors)
     _verify_html(root, errors)
 
     if errors:
@@ -212,6 +215,103 @@ def _verify_ledger(
         return {}
     finally:
         connection.close()
+
+
+def _load_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _verify_preflight(
+    root: Path, manifest: dict[str, Any], errors: list[str]
+) -> None:
+    path = root / "preflight.json"
+    if not path.is_file():
+        return
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        errors.append(f"preflight.json 无法读取或不是有效 JSON：{exc}")
+        return
+    if not isinstance(document, dict):
+        errors.append("preflight.json 顶层必须是对象。")
+        return
+    if document.get("run_id") != manifest.get("run_id"):
+        errors.append("preflight.json 的 run_id 与 manifest 不一致。")
+    state = document.get("state")
+    if state not in {
+        "optimal",
+        "provisional",
+        "unknown",
+        "no_feasible",
+        "stale",
+        "identity_invalid",
+        "constraint_invalid",
+        "not_configured",
+    }:
+        errors.append(f"preflight.json 的 state 无效：{state}")
+    declared = manifest.get("preflight")
+    if isinstance(declared, dict):
+        for key in (
+            "config_sha256",
+            "source_digest",
+            "rules_sha256",
+            "constraint_digest",
+            "state",
+        ):
+            if declared.get(key) != document.get(key):
+                errors.append(
+                    f"manifest.preflight.{key} 与 preflight.json 不一致。"
+                )
+        if declared.get("evidence_verified") != document.get("evidence_verified"):
+            errors.append("manifest.preflight.evidence_verified 不一致。")
+        plan_document = _load_json(root / "plan.json")
+        if isinstance(plan_document, dict):
+            plan_gate = (plan_document.get("preflight") or {}).get("gate")
+            if plan_gate != declared.get("gate"):
+                errors.append("manifest.preflight.gate 与 plan.json 不一致。")
+    objectives = document.get("objectives") or {}
+    keys_path = root / "preflight-keys.jsonl"
+    if not keys_path.is_file():
+        errors.append("缺少 preflight-keys.jsonl。")
+        return
+    expected = 0
+    for objective, evaluation in objectives.items():
+        if not isinstance(evaluation, dict):
+            continue
+        if evaluation.get("objective") != objective:
+            errors.append(f"preflight objectives.{objective}.objective 不一致。")
+        keys = evaluation.get("keys") or []
+        expected += len(keys)
+        proof = evaluation.get("proof") or {}
+        if evaluation.get("status") == "optimal" and proof.get(
+            "optimality"
+        ) != "proven_exhaustive":
+            errors.append(f"preflight {objective} 声称最优但缺少穷尽证明。")
+        if evaluation.get("status") == "provisional" and proof.get(
+            "optimality"
+        ) != "unknown":
+            errors.append(f"preflight {objective} 暂定组合的最优性必须为 unknown。")
+    lines = [
+        line
+        for line in keys_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if len(lines) != expected:
+        errors.append(
+            f"preflight-keys.jsonl 行数 {len(lines)} 与 preflight.json 证据数 {expected} 不一致。"
+        )
+    for line in lines[:5]:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            errors.append("preflight-keys.jsonl 含无效 JSON 行。")
+            break
+        if row.get("run_id") != manifest.get("run_id"):
+            errors.append("preflight-keys.jsonl 的 run_id 与 manifest 不一致。")
+            break
 
 
 def _verify_html(root: Path, errors: list[str]) -> None:

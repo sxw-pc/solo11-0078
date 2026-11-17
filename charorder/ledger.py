@@ -12,6 +12,7 @@ from typing import Any
 from . import APP_NAME, APP_SLUG, UNICODE_VERSION, __version__
 from .errors import OutputError
 from .models import ScanResult
+from .transforms import sanitize_text
 
 
 def write_ledger(result: ScanResult, path: Path) -> None:
@@ -149,6 +150,68 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             record_id TEXT,
             PRIMARY KEY (group_id, key_result_id)
         );
+        CREATE TABLE preflight_runs (
+            run_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            stale INTEGER NOT NULL,
+            stale_reasons_json TEXT NOT NULL,
+            config_sha256 TEXT NOT NULL,
+            source_digest TEXT NOT NULL,
+            rules_sha256 TEXT NOT NULL,
+            constraint_digest TEXT NOT NULL,
+            evidence_verified INTEGER NOT NULL,
+            candidate_rule_ids_json TEXT NOT NULL,
+            total_combinations INTEGER NOT NULL,
+            examined_combinations INTEGER NOT NULL,
+            budget_exhausted INTEGER NOT NULL,
+            relation_summary_json TEXT NOT NULL,
+            witness_json TEXT,
+            notes_json TEXT NOT NULL,
+            config_summary_json TEXT NOT NULL
+        );
+        CREATE TABLE preflight_objectives (
+            objective TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            exit_code INTEGER NOT NULL,
+            provisional INTEGER NOT NULL,
+            exhaustive INTEGER NOT NULL,
+            combination_rank INTEGER NOT NULL,
+            changed_records INTEGER NOT NULL,
+            total_bytes INTEGER NOT NULL,
+            selected_transforms_json TEXT NOT NULL,
+            checks_json TEXT NOT NULL,
+            proof_json TEXT NOT NULL
+        );
+        CREATE TABLE preflight_rule_selections (
+            objective TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            transform_json TEXT NOT NULL,
+            PRIMARY KEY (objective, rule_id)
+        );
+        CREATE TABLE preflight_key_results (
+            objective TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            record_ref TEXT NOT NULL,
+            record_id TEXT,
+            old_key TEXT,
+            old_bytes INTEGER NOT NULL,
+            new_key TEXT,
+            new_bytes INTEGER NOT NULL,
+            changed INTEGER NOT NULL,
+            transform_json TEXT NOT NULL,
+            defects_json TEXT NOT NULL,
+            PRIMARY KEY (objective, rule_id, record_ref)
+        );
+        CREATE TABLE preflight_relations (
+            relation_kind TEXT NOT NULL,
+            relation_id TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            status TEXT NOT NULL,
+            detail_json TEXT NOT NULL,
+            PRIMARY KEY (relation_kind, relation_id, objective)
+        );
         CREATE INDEX ix_key_results_rule ON key_results (rule_id, target_key);
         CREATE INDEX ix_key_results_source ON key_results (source_id, record_ref);
         CREATE INDEX ix_findings_severity ON findings (severity, code);
@@ -167,6 +230,12 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             FROM collisions
             GROUP BY rule_id, source_id, reason_code
             ORDER BY rule_id;
+        CREATE VIEW preflight_objective_summary AS
+            SELECT o.objective, o.status, o.provisional, o.changed_records,
+                   o.total_bytes, r.examined_combinations, r.state, r.stale
+            FROM preflight_objectives o
+            JOIN preflight_runs r ON r.run_id = o.run_id
+            ORDER BY o.objective;
         """
     )
 
@@ -389,6 +458,149 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             for participant in group.participants
         ],
     )
+    preflight = result.preflight
+    if preflight is not None:
+        _insert_preflight(connection, result, preflight)
+
+
+def _insert_preflight(
+    connection: sqlite3.Connection,
+    result: ScanResult,
+    preflight: Any,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO preflight_runs (
+            run_id, state, stale, stale_reasons_json, config_sha256,
+            source_digest, rules_sha256, constraint_digest, evidence_verified,
+            candidate_rule_ids_json, total_combinations, examined_combinations,
+            budget_exhausted, relation_summary_json, witness_json, notes_json,
+            config_summary_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            result.run_id,
+            preflight.state,
+            int(preflight.stale),
+            _json(preflight.stale_reasons),
+            preflight.config_sha256,
+            preflight.source_digest,
+            preflight.rules_sha256,
+            preflight.constraint_digest,
+            int(preflight.evidence_verified),
+            _json(preflight.candidate_rule_ids),
+            preflight.total_combinations,
+            preflight.examined_combinations,
+            int(preflight.budget_exhausted),
+            _json(preflight.relation_summary),
+            None if preflight.witness is None else _json(preflight.witness),
+            _json(preflight.notes),
+            _json(preflight.config_summary),
+        ),
+    )
+    for objective, evaluation in preflight.objective_results.items():
+        if evaluation is None:
+            continue
+        connection.execute(
+            """
+            INSERT INTO preflight_objectives (
+                objective, run_id, status, exit_code, provisional, exhaustive,
+                combination_rank, changed_records, total_bytes,
+                selected_transforms_json, checks_json, proof_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                objective,
+                result.run_id,
+                evaluation.status,
+                evaluation.exit_code,
+                int(evaluation.provisional),
+                int(evaluation.exhaustive),
+                evaluation.combination_rank,
+                evaluation.changed_records,
+                evaluation.total_bytes,
+                _json(
+                    {
+                        rule_id: spec.as_dict()
+                        for rule_id, spec in evaluation.selected_transforms.items()
+                    }
+                ),
+                _json(evaluation.checks),
+                _json(evaluation.proof),
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO preflight_rule_selections (
+                objective, rule_id, transform_json
+            ) VALUES (?, ?, ?)
+            """,
+            [
+                (objective, rule_id, _json(spec.as_dict()))
+                for rule_id, spec in evaluation.selected_transforms.items()
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO preflight_key_results (
+                objective, rule_id, source_id, record_ref, record_id,
+                old_key, old_bytes, new_key, new_bytes, changed,
+                transform_json, defects_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    objective,
+                    item.rule_id,
+                    item.source_id,
+                    item.record_ref,
+                    item.record_id,
+                    None if item.old_key is None else sanitize_text(item.old_key),
+                    item.old_bytes,
+                    None if item.new_key is None else sanitize_text(item.new_key),
+                    item.new_bytes,
+                    int(item.changed),
+                    _json(item.transform.as_dict()),
+                    _json(item.defects),
+                )
+                for item in evaluation.key_evidence
+            ],
+        )
+        relations = evaluation.checks.get("relations", {})
+        for relation_kind, relation_id, status in _relation_rows(
+            preflight, evaluation
+        ):
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO preflight_relations (
+                    relation_kind, relation_id, objective, status, detail_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    relation_kind,
+                    relation_id,
+                    objective,
+                    status,
+                    _json(relations),
+                ),
+            )
+
+
+def _relation_rows(preflight: Any, evaluation: Any):
+    spec = preflight.relation_summary or {}
+    checks = evaluation.checks.get("relations", {})
+    for link_id in spec.get("authorized_link_ids", []):
+        yield (
+            "authorized_link",
+            link_id,
+            "satisfied" if checks.get("authorized_links_satisfied") else "violated",
+        )
+    for pair_id in spec.get("forbidden_pair_ids", []):
+        yield (
+            "forbidden_pair",
+            pair_id,
+            "clear" if checks.get("forbidden_pairs_clear") else "violated",
+        )
 
 
 def _record_pk(run_id: str, source_id: str, record_ref: str) -> str:

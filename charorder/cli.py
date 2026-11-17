@@ -150,6 +150,27 @@ def _run_command(
             f"超限键 {summary['overlength_keys']}"
         )
         print(f"结论：{result.verdict}")
+        if result.preflight is not None:
+            preflight = result.preflight
+            print(
+                f"规则调整预检：{preflight.state} · "
+                f"组合 {preflight.examined_combinations}/{preflight.total_combinations}"
+                + ("（预算耗尽，最优性 unknown）" if preflight.budget_exhausted else "")
+            )
+            for objective, evaluation in preflight.objective_results.items():
+                if evaluation is None:
+                    print(f"  - {objective}: 无已验证组合")
+                else:
+                    print(
+                        f"  - {objective}: {evaluation.status} · "
+                        f"改变键 {evaluation.changed_records} · "
+                        f"总字节 {evaluation.total_bytes}"
+                    )
+            gate = result.plan.get("preflight_gate", {})
+            print(
+                "  预检门禁："
+                + ("通过（仅限规则调整建议）" if gate.get("clears") else "未通过")
+            )
         print(f"运行 ID：{result.run_id}")
         print(f"输出：{output_dir.resolve()}")
         print(f"复核页：{(output_dir / 'report.html').resolve()}")

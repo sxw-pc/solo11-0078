@@ -25,6 +25,8 @@ ARTIFACT_FILES = (
     "findings.json",
     "collisions.json",
     "keys.jsonl",
+    "preflight.json",
+    "preflight-keys.jsonl",
     "ledger.sqlite",
     "manifest.json",
 )
@@ -86,6 +88,20 @@ def write_artifacts(
         "report.md": render_markdown(result).encode("utf-8"),
         "report.html": render_html(result).encode("utf-8"),
     }
+    if result.preflight is not None:
+        artifacts["preflight.json"] = _json_bytes(result.preflight.as_dict())
+        artifacts["preflight-keys.jsonl"] = _preflight_keys_jsonl(result)
+    else:
+        # Keep the artifact set stable whether or not a preflight is declared.
+        artifacts["preflight.json"] = _json_bytes(
+            {
+                "schema_version": 1,
+                "kind": "charorder.preflight",
+                "state": "not_configured",
+                "run_id": result.run_id,
+            }
+        )
+        artifacts["preflight-keys.jsonl"] = b""
     for name, content in artifacts.items():
         _atomic_write_bytes(output_dir / name, content)
 
@@ -120,6 +136,45 @@ def write_artifacts(
             "sha256": result.config.config_sha256,
         },
         "summary": result.summary,
+        "preflight": (
+            None
+            if result.preflight is None
+            else {
+                "state": result.preflight.state,
+                "stale": result.preflight.stale,
+                "evidence_verified": result.preflight.evidence_verified,
+                "run_id": result.preflight.run_id,
+                "config_sha256": result.preflight.config_sha256,
+                "source_digest": result.preflight.source_digest,
+                "rules_sha256": result.preflight.rules_sha256,
+                "constraint_digest": result.preflight.constraint_digest,
+                "total_combinations": result.preflight.total_combinations,
+                "examined_combinations": result.preflight.examined_combinations,
+                "budget_exhausted": result.preflight.budget_exhausted,
+                "state": result.preflight.state,
+                "gate": result.plan.get("preflight_gate"),
+                "artifact": "preflight.json",
+                "keys_artifact": "preflight-keys.jsonl",
+                "objectives": {
+                    objective: (
+                        None
+                        if evaluation is None
+                        else {
+                            "status": evaluation.status,
+                            "exit_code": evaluation.exit_code,
+                            "provisional": evaluation.provisional,
+                            "changed_records": evaluation.changed_records,
+                            "total_bytes": evaluation.total_bytes,
+                            "selected_transforms": {
+                                rule_id: spec.as_dict()
+                                for rule_id, spec in evaluation.selected_transforms.items()
+                            },
+                        }
+                    )
+                    for objective, evaluation in result.preflight.objective_results.items()
+                },
+            }
+        ),
         "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
         "source_fingerprints": result.plan["source_fingerprints"],
         "artifacts": artifact_records,
@@ -173,6 +228,23 @@ def _json_bytes(value: Any) -> bytes:
     )
     # JSON files remain valid UTF-8 even when an input contained a lone surrogate.
     return (text + "\n").encode("utf-8", errors="replace")
+
+
+def _preflight_keys_jsonl(result: ScanResult) -> bytes:
+    assert result.preflight is not None
+    rows = []
+    for objective, evaluation in result.preflight.objective_results.items():
+        if evaluation is None:
+            continue
+        for item in evaluation.key_evidence:
+            row = item.as_dict()
+            row["objective"] = objective
+            row["status"] = evaluation.status
+            row["run_id"] = result.run_id
+            row["source_digest"] = result.preflight.source_digest
+            row["constraint_digest"] = result.preflight.constraint_digest
+            rows.append(row)
+    return _jsonl_bytes(rows)
 
 
 def _jsonl_bytes(rows: Any) -> bytes:
