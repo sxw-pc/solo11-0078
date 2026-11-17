@@ -72,3 +72,51 @@ def ci_key(
         "max_bytes": max_bytes,
         "max_chars": max_chars,
     }
+
+
+def language_policy(
+    *,
+    contract: str,
+    tag_field: str | None = None,
+    default_language: str | None = None,
+    supported_languages: list[str] | None = None,
+) -> dict[str, Any]:
+    policy: dict[str, Any] = {"contract": contract}
+    if tag_field is not None:
+        policy["tag_field"] = tag_field
+    if default_language is not None:
+        policy["default_language"] = default_language
+    if supported_languages is not None:
+        policy["supported_languages"] = supported_languages
+    return policy
+
+
+def language_key(
+    *,
+    key_id: str,
+    source_id: str,
+    columns: list[str],
+    policy: dict[str, Any],
+    case: str = "lower",
+    normalization: str = "NFC",
+    unique: bool = True,
+    required: bool = True,
+) -> dict[str, Any]:
+    return {
+        "id": key_id,
+        "label": key_id,
+        "source": source_id,
+        "columns": columns,
+        "destination": f"target.{key_id}",
+        "transform": {
+            "normalization": normalization,
+            "case": case,
+            "width_fold": False,
+            "trim": True,
+            "collapse_whitespace": False,
+            "invisible": "keep",
+            "language_policy": policy,
+        },
+        "unique": unique,
+        "required": required,
+    }

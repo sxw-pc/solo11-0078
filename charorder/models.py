@@ -31,6 +31,11 @@ DEFAULT_SEVERITIES: dict[str, str] = {
     "COMPOSITE_SEPARATOR": "high",
     "NORMALIZATION_COLLISION": "high",
     "DUPLICATE_KEY": "high",
+    "LANGUAGE_TAG_MISSING": "high",
+    "LANGUAGE_TAG_INVALID": "high",
+    "LANGUAGE_TAG_UNSUPPORTED": "high",
+    "TURKIC_CASE_GOVERNANCE_REQUIRED": "high",
+    "CROSS_LANGUAGE_COLLISION": "high",
 }
 
 CHECK_CODES = tuple(DEFAULT_SEVERITIES.keys())
@@ -56,6 +61,11 @@ CHECK_LABELS: dict[str, str] = {
     "COMPOSITE_SEPARATOR": "复合键含保留分隔符",
     "NORMALIZATION_COLLISION": "归一化后唯一键碰撞",
     "DUPLICATE_KEY": "相同原始值唯一键重复",
+    "LANGUAGE_TAG_MISSING": "语言身份标签缺失，无法判定键等价类",
+    "LANGUAGE_TAG_INVALID": "语言身份标签格式非法",
+    "LANGUAGE_TAG_UNSUPPORTED": "语言身份不在规则声明的支持范围内",
+    "TURKIC_CASE_GOVERNANCE_REQUIRED": "Turkic 特殊大小写记录被 neutral_only 合同阻断",
+    "CROSS_LANGUAGE_COLLISION": "不同语言记录落到同一目标唯一键",
 }
 
 VERDICT_LABEL = {
@@ -88,6 +98,51 @@ class SourceSpec:
 
 
 @dataclass(frozen=True)
+class LanguagePolicy:
+    """Opt-in language identity contract for a key rule.
+
+    Two independent, safe contracts are supported:
+
+    * ``neutral_only`` keeps the locale-neutral target semantics but blocks
+      migration of records declared tr/az whose values depend on Turkic
+      special casing, requiring source governance first;
+    * ``language_aware`` applies the full-context tr/az Unicode mappings once
+      a verifiable language tag is present, and refuses to guess equivalence
+      classes when the tag is missing, malformed, or unsupported.
+
+    The tag comes either from a verifiable record field (``tag_field``) or
+    from one rule-level unified declaration (``default_language``); exactly
+    one source must be configured.
+    """
+
+    contract: str  # "neutral_only" | "language_aware"
+    tag_field: str | None = None
+    default_language: str | None = None
+    supported_languages: tuple[str, ...] = ("tr", "az")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "contract": self.contract,
+            "tag_field": self.tag_field,
+            "default_language": self.default_language,
+            "supported_languages": list(self.supported_languages),
+        }
+
+    def describe(self) -> str:
+        source = (
+            f"字段 {self.tag_field}"
+            if self.tag_field
+            else f"统一声明 {self.default_language}"
+        )
+        contract_label = (
+            "语言感知（tr/az 特殊大小写）"
+            if self.contract == "language_aware"
+            else "仅语言中性（Turkic 键阻断治理）"
+        )
+        return f"{contract_label}；语言标签来源：{source}"
+
+
+@dataclass(frozen=True)
 class TransformSpec:
     normalization: str = "NFC"
     case: str = "none"
@@ -95,6 +150,7 @@ class TransformSpec:
     trim: bool = True
     collapse_whitespace: bool = False
     invisible: str = "keep"
+    language_policy: LanguagePolicy | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +160,9 @@ class TransformSpec:
             "trim": self.trim,
             "collapse_whitespace": self.collapse_whitespace,
             "invisible": self.invisible,
+            "language_policy": (
+                self.language_policy.as_dict() if self.language_policy else None
+            ),
         }
 
     def describe(self) -> str:
@@ -120,7 +179,10 @@ class TransformSpec:
             parts.append("折叠空白")
         if self.trim:
             parts.append("去首尾空白")
-        return " → ".join(parts) if parts else "原样保留"
+        text = " → ".join(parts) if parts else "原样保留"
+        if self.language_policy is not None:
+            text += f"；{self.language_policy.describe()}"
+        return text
 
 
 @dataclass(frozen=True)
@@ -244,6 +306,12 @@ class KeyResult:
     changed: bool
     defects: list[Defect] = field(default_factory=list)
     collision_group_id: str | None = None
+    # Language-identity preflight evidence. ``language_status`` is one of:
+    # not_configured / declared / resolved / missing / invalid / unsupported.
+    language_tag: str | None = None
+    language_status: str = "not_configured"
+    case_contract: str = "neutral"
+    traces: list[Any] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -260,6 +328,10 @@ class KeyResult:
             "key_bytes": self.key_bytes,
             "key_chars": self.key_chars,
             "changed": self.changed,
+            "language_tag": self.language_tag,
+            "language_status": self.language_status,
+            "case_contract": self.case_contract,
+            "transform_traces": [trace.to_dict() for trace in self.traces],
             "defects": [
                 {"code": d.code, "severity": d.severity, "column": d.column}
                 for d in self.defects
@@ -278,6 +350,8 @@ class CollisionGroup:
     reason_code: str
     participants: list[KeyResult]
     raw_variants: list[str]
+    languages: list[str] = field(default_factory=list)
+    cross_language: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -289,11 +363,16 @@ class CollisionGroup:
             "reason_code": self.reason_code,
             "record_count": len(self.participants),
             "distinct_raw_count": len(self.raw_variants),
+            "languages": list(self.languages),
+            "cross_language": self.cross_language,
             "participants": [
                 {
                     "key_result_id": k.key_result_id,
                     "record_ref": k.record_ref,
                     "record_id": k.record_id,
+                    "language_tag": k.language_tag,
+                    "language_status": k.language_status,
+                    "case_contract": k.case_contract,
                     "raw_values": list(k.raw_values),
                     "raw_display": k.raw_display,
                 }

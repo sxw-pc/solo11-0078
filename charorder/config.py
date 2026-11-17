@@ -16,10 +16,12 @@ from .models import (
     SEVERITIES,
     AppConfig,
     KeyRule,
+    LanguagePolicy,
     ProjectSpec,
     SourceSpec,
     TransformSpec,
 )
+from .transforms import TURKIC_LANGUAGES
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _TOP_LEVEL = {"version", "project", "sources", "keys", "severity_overrides", "reports"}
@@ -55,7 +57,18 @@ _TRANSFORM_FIELDS = {
     "trim",
     "collapse_whitespace",
     "invisible",
+    "language_policy",
 }
+_LANGUAGE_POLICY_FIELDS = {
+    "contract",
+    "tag_field",
+    "default_language",
+    "supported_languages",
+}
+_LANGUAGE_CONTRACTS = {"neutral_only", "language_aware"}
+# BCP 47 primary subtag: 2-3 letter language code (4-8 letter primary subtags
+# are registered, but the supported set is tr/az, so 2-3 is sufficient here).
+_LANGUAGE_TAG_RE = re.compile(r"^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$")
 _REPORT_FIELDS = {"max_report_rows"}
 
 
@@ -317,6 +330,10 @@ def _parse_transform(item: Any, where: str) -> TransformSpec:
     if invisible not in {"keep", "remove"}:
         raise ConfigError(f"{where}.invisible 必须是 keep 或 remove。")
 
+    policy = None
+    if "language_policy" in obj and obj["language_policy"] is not None:
+        policy = _parse_language_policy(obj["language_policy"], f"{where}.language_policy", case)
+
     return TransformSpec(
         normalization=normalization,
         case=case,
@@ -324,7 +341,92 @@ def _parse_transform(item: Any, where: str) -> TransformSpec:
         trim=trim,
         collapse_whitespace=collapse,
         invisible=invisible,
+        language_policy=policy,
     )
+
+
+def _parse_language_policy(item: Any, where: str, case: str) -> LanguagePolicy:
+    obj = _require_object(item, where)
+    _reject_unknown(obj, _LANGUAGE_POLICY_FIELDS, where)
+
+    contract = _require_nonempty_str(obj.get("contract"), f"{where}.contract").lower()
+    if contract not in _LANGUAGE_CONTRACTS:
+        raise ConfigError(
+            f"{where}.contract 必须是 neutral_only 或 language_aware。"
+        )
+
+    if case == "none":
+        raise ConfigError(
+            f"{where} 要求 transform.case 为 lower / upper / casefold；"
+            "语言身份合同只在存在大小写映射时才有意义。"
+        )
+
+    tag_field = obj.get("tag_field")
+    default_language = obj.get("default_language")
+    if tag_field is not None and default_language is not None:
+        raise ConfigError(
+            f"{where} 的 tag_field 与 default_language 互斥："
+            "语言标签只能来自记录字段或统一声明中的一个来源。"
+        )
+    if tag_field is None and default_language is None:
+        raise ConfigError(
+            f"{where} 必须声明 tag_field（可核验记录字段）或 "
+            "default_language（统一来源）之一。"
+        )
+
+    if tag_field is not None:
+        tag_field = _require_nonempty_str(tag_field, f"{where}.tag_field")
+        default_language_text = None
+    else:
+        default_language_text = _require_nonempty_str(
+            default_language, f"{where}.default_language"
+        )
+        default_language_text = _normalize_language_tag(
+            default_language_text, f"{where}.default_language"
+        )
+
+    languages_obj = obj.get("supported_languages", ["tr", "az"])
+    if not isinstance(languages_obj, list) or not languages_obj:
+        raise ConfigError(f"{where}.supported_languages 必须是非空字符串数组。")
+    supported: list[str] = []
+    for index, value in enumerate(languages_obj):
+        tag = _require_nonempty_str(
+            value, f"{where}.supported_languages[{index}]"
+        )
+        normalized = _normalize_language_tag(
+            tag, f"{where}.supported_languages[{index}]"
+        )
+        if normalized not in TURKIC_LANGUAGES:
+            raise ConfigError(
+                f"{where}.supported_languages 目前仅支持 tr / az "
+                f"（Turkic 特殊大小写合同），收到：{normalized}"
+            )
+        if normalized not in supported:
+            supported.append(normalized)
+
+    if default_language_text is not None and default_language_text not in supported:
+        raise ConfigError(
+            f"{where}.default_language {default_language_text} 不在 "
+            f"supported_languages {sorted(supported)} 内。"
+        )
+
+    return LanguagePolicy(
+        contract=contract,
+        tag_field=tag_field,
+        default_language=default_language_text,
+        supported_languages=tuple(supported),
+    )
+
+
+def _normalize_language_tag(tag: str, where: str) -> str:
+    """Validate a BCP 47-ish tag and return its lowercase primary subtag."""
+
+    text = tag.strip()
+    if not _LANGUAGE_TAG_RE.fullmatch(text):
+        raise ConfigError(
+            f"{where} 不是合法语言标签（期望 BCP 47 主子标签，如 tr、az-Latn、en）：{tag}"
+        )
+    return text.split("-", 1)[0].lower()
 
 
 def _reject_unknown(obj: dict[str, Any], allowed: set[str], where: str) -> None:

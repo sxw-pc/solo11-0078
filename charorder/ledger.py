@@ -41,7 +41,7 @@ def write_ledger(result: ScanResult, path: Path) -> None:
 def _create_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
         CREATE TABLE meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -115,7 +115,20 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             key_chars INTEGER NOT NULL,
             changed INTEGER NOT NULL,
             collision_group_id TEXT,
+            language_tag TEXT,
+            language_status TEXT NOT NULL,
+            case_contract TEXT NOT NULL,
             defects_json TEXT NOT NULL
+        );
+        CREATE TABLE key_transform_traces (
+            key_result_id TEXT NOT NULL,
+            component_index INTEGER NOT NULL,
+            language_tag TEXT,
+            case_contract TEXT NOT NULL,
+            raw_codepoints_json TEXT NOT NULL,
+            final_codepoints_json TEXT NOT NULL,
+            stages_json TEXT NOT NULL,
+            PRIMARY KEY (key_result_id, component_index)
         );
         CREATE TABLE findings (
             finding_id TEXT PRIMARY KEY,
@@ -140,6 +153,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             reason_code TEXT NOT NULL,
             record_count INTEGER NOT NULL,
             distinct_raw_count INTEGER NOT NULL,
+            languages_json TEXT NOT NULL,
+            cross_language INTEGER NOT NULL,
             raw_variants_json TEXT NOT NULL
         );
         CREATE TABLE collision_members (
@@ -286,8 +301,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             key_result_id, run_id, source_id, rule_id, ordinal, record_ref,
             record_id, raw_values_json, raw_display, target_key,
             target_key_escaped, key_sha256, key_bytes, key_chars, changed,
-            collision_group_id, defects_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            collision_group_id, language_tag, language_status, case_contract,
+            defects_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -307,6 +323,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 item.key_chars,
                 int(item.changed),
                 item.collision_group_id,
+                item.language_tag,
+                item.language_status,
+                item.case_contract,
                 _json(
                     [
                         {
@@ -321,6 +340,28 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 ),
             )
             for item in result.key_results
+        ],
+    )
+
+    connection.executemany(
+        """
+        INSERT INTO key_transform_traces (
+            key_result_id, component_index, language_tag, case_contract,
+            raw_codepoints_json, final_codepoints_json, stages_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                item.key_result_id,
+                trace.component_index,
+                trace.language,
+                trace.case_contract,
+                _json(list(trace.raw_codepoints)),
+                _json(list(trace.final_codepoints)),
+                _json([stage.to_dict() for stage in trace.stages]),
+            )
+            for item in result.key_results
+            for trace in item.traces
         ],
     )
 
@@ -353,8 +394,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
         """
         INSERT INTO collisions (
             group_id, run_id, rule_id, source_id, target_key, target_key_escaped,
-            reason_code, record_count, distinct_raw_count, raw_variants_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            reason_code, record_count, distinct_raw_count, languages_json,
+            cross_language, raw_variants_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -367,6 +409,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 group.reason_code,
                 len(group.participants),
                 len(group.raw_variants),
+                _json(group.languages),
+                int(group.cross_language),
                 _json(group.raw_variants),
             )
             for group in result.collisions

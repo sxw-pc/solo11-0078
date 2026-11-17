@@ -93,7 +93,12 @@ def render_markdown(result: ScanResult) -> str:
         f"目标键：{summary['keys_evaluated']} 个",
         f"- 高 / 中 / 低风险：**{sev.get('high', 0)} / {sev.get('medium', 0)} / {sev.get('low', 0)}**",
         f"- 归一化唯一键碰撞组：**{summary['collision_groups']}**，"
-        f"涉及 **{summary['collision_records']}** 条记录",
+        f"涉及 **{summary['collision_records']}** 条记录"
+        + (
+            f"，其中跨语言碰撞组 **{summary.get('cross_language_collision_groups', 0)}** 个"
+            if summary.get("cross_language_collision_groups")
+            else ""
+        ),
         f"- 超限键：**{summary['overlength_keys']}** · 变换后键值变化：**{summary['changed_keys']}**",
         "",
         "## 源文件指纹",
@@ -130,6 +135,31 @@ def render_markdown(result: ScanResult) -> str:
             f"{_md(_STATUS_LABEL.get(plan_rule['status'], plan_rule['status']))} |"
         )
 
+    language_contracts = plan.get("language_contracts", {}).get("rules", {})
+    if language_contracts:
+        lines.extend(
+            [
+                "",
+                "## 语言身份键预检（opt-in）",
+                "",
+                "| 规则 | 合同 | 标签来源 | 记录 | tr/az 映射 | 中性映射 | 语言阻断 | 可迁移 | 标签状态 |",
+                "|---|---|---|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+        for rule_id, bucket in language_contracts.items():
+            source = (
+                bucket.get("tag_field")
+                or f"统一声明 {bucket.get('default_language')}"
+            )
+            lines.append(
+                f"| {_md(rule_id)} | {_md(bucket.get('contract'))} | {_md(source)} | "
+                f"{bucket.get('records', 0)} | {bucket.get('turkic_mapped', 0)} | "
+                f"{bucket.get('neutral_mapped', 0)} | {bucket.get('blocked_by_language', 0)} | "
+                f"{bucket.get('migratable', 0)} | "
+                f"{_md(json.dumps(bucket.get('by_status', {}), ensure_ascii=False, sort_keys=True))} |"
+            )
+        lines.append("")
+
     lines.extend(["", "## 唯一键碰撞组", ""])
     if not result.collisions:
         lines.append("未发现唯一键碰撞组。")
@@ -139,10 +169,11 @@ def render_markdown(result: ScanResult) -> str:
                 f"### `{group.group_id}` · `{group.rule_id}`"
             )
             lines.append("")
+            cross_note = " · **跨语言碰撞**" if group.cross_language else ""
             lines.append(
                 f"- 目标键：{_md_code(group.target_key_escaped)}  "
                 f"\n- 类型：`{group.reason_code}` · 记录数：{len(group.participants)} · "
-                f"原始变体：{len(group.raw_variants)}"
+                f"原始变体：{len(group.raw_variants)} · 语言标签：{', '.join(group.languages)}{cross_note}"
             )
             lines.append("")
             lines.append("| 记录引用 | 记录标识 | 原始值 |")
@@ -262,11 +293,19 @@ def render_plan_markdown(result: ScanResult) -> str:
             "",
             "## 规则就绪度",
             "",
-            "| 规则 | 源 / 列 | 目标 | 状态 | 记录 | 键变化 | 碰撞组 | 超限 | 阻断检查 |",
-            "|---|---|---|---|---:|---:|---:|---:|---|",
+            "| 规则 | 源 / 列 | 目标 | 状态 | 记录 | 键变化 | 碰撞组 | 超限 | 语言合同 | 阻断检查 |",
+            "|---|---|---|---|---:|---:|---:|---:|---|---|",
         ]
     )
     for rule in plan["rules"]:
+        language_bucket = rule.get("language_contract")
+        if language_bucket:
+            contract_text = (
+                f"{language_bucket['contract']} / 阻断 {language_bucket['blocked_by_language']}"
+                f" / 可迁移 {language_bucket['migratable']}"
+            )
+        else:
+            contract_text = "—"
         lines.append(
             f"| {_md(rule['rule_id'])} | {_md(rule['source_id'])} / "
             f"{_md_code(' + '.join(rule['columns']))} | "
@@ -274,6 +313,7 @@ def render_plan_markdown(result: ScanResult) -> str:
             f"{_md(_STATUS_LABEL.get(rule['status'], rule['status']))} | "
             f"{rule['records']} | {rule['changed_keys']} | "
             f"{rule['collision_groups']} | {rule['overlength']} | "
+            f"{_md(contract_text)} | "
             f"{_md(', '.join(rule['blocking_codes']) or '—')} |"
         )
     lines.extend(["", "## 执行步骤", ""])
@@ -405,6 +445,10 @@ def render_html(result: ScanResult) -> str:
           <div class="muted small">
             源 {_e(group.source_id)} · 原始变体 {len(group.raw_variants)} 种 · 目标键 SHA-256 {_e((group.participants[0].key_sha256 or '')[:20])}…
           </div>
+          <div class="muted small">
+            语言标签：{_e(', '.join(group.languages))}
+            {' · <strong class="cross-lang-flag">跨语言碰撞：语言身份不得掩盖共享索引同键</strong>' if group.cross_language else ''}
+          </div>
           <div class="table-scroll compact">
             <table>
               <thead><tr><th>记录引用</th><th>记录标识</th><th>原始值</th></tr></thead>
@@ -519,6 +563,40 @@ def render_html(result: ScanResult) -> str:
         </li>"""
         for step in plan["steps"]
     )
+
+    language_contracts = result.plan.get("language_contracts", {}).get("rules", {})
+    language_cards = []
+    for rule_id, bucket in language_contracts.items():
+        status_counts = bucket.get("by_status", {})
+        language_cards.append(
+            f"""
+        <article class="collision-card">
+          <header><div><div class="eyebrow small">{_e(bucket.get('contract'))}</div>
+          <h3><span class="mono">{_e(rule_id)}</span></h3></div>
+          <span class="count-chip">{bucket.get('migratable', 0):,} 可迁移</span></header>
+          <div class="muted small">
+            标签来源：{_e(bucket.get('tag_field') or ('统一声明 ' + str(bucket.get('default_language'))))}
+            · 支持语言：{_e(', '.join(bucket.get('supported_languages', [])))}
+          </div>
+          <table class="compact"><tbody>
+            <tr><td>记录数</td><td class="num">{bucket.get('records', 0):,}</td></tr>
+            <tr><td>tr/az 上下文映射键</td><td class="num">{bucket.get('turkic_mapped', 0):,}</td></tr>
+            <tr><td>语言中性映射键</td><td class="num">{bucket.get('neutral_mapped', 0):,}</td></tr>
+            <tr><td>语言门禁阻断</td><td class="num">{bucket.get('blocked_by_language', 0):,}</td></tr>
+            <tr><td>标签状态</td><td class="num">{_e(json.dumps(status_counts, ensure_ascii=False, sort_keys=True))}</td></tr>
+            <tr><td>语言分布</td><td class="num">{_e(json.dumps(bucket.get('by_language', {}), ensure_ascii=False, sort_keys=True))}</td></tr>
+          </tbody></table>
+        </article>"""
+        )
+    language_section = ""
+    if language_cards:
+        language_section = f"""
+  <section class="section" id="language">
+    <div class="section-head"><h2>语言身份键预检（opt-in）</h2><p>固定 Unicode {_e(UNICODE_VERSION)} SpecialCasing · 标签缺失/冲突/未支持不猜测等价类</p></div>
+    <div class="collisions">{''.join(language_cards)}</div>
+    <p class="note">neutral_only 合同对声明为 tr/az 且含 I/İ/ı/i 或 U+0307 的键阻断迁移并要求先治理；language_aware 合同仅在标签可核验时使用全字符串上下文 tr/az 映射。跨语言记录若落到同一目标唯一键，仍按真实碰撞在上方列出。</p>
+  </section>
+"""
 
     config = result.config
     high_findings = sev.get("high", 0)
@@ -704,6 +782,7 @@ tbody tr:hover {{ background: #faf7f0; }}
 .collision-key {{ background: #f4f0e7; border: 1px solid #e4ddcf; border-radius: 10px; padding: 10px 12px; margin: 10px 0 8px; overflow-wrap: anywhere; }}
 .collision-key code {{ display: block; margin-top: 3px; font-size: 12.5px; }}
 .count-chip {{ background: var(--teal-deep); color: #eff8f3; border-radius: 999px; padding: 4px 10px; font-family: var(--mono); font-size: 11px; white-space: nowrap; }}
+.cross-lang-flag {{ color: var(--red); }}
 .table-scroll.compact {{ margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; }}
 .compact td, .compact th {{ padding: 8px 10px; }}
 .value-cell {{ overflow-wrap: anywhere; max-width: 300px; }}
@@ -829,10 +908,10 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
         <thead><tr><th>规则</th><th>源 / 列</th><th>目标位置</th><th>变换管线</th><th>记录</th><th>碰撞组</th><th>超限</th><th>约束</th><th>状态</th></tr></thead>
         <tbody>{''.join(rule_rows)}</tbody>
       </table>
-      <p class="note">变换顺序固定为：移除 Cf 不可见字符 → 宽度折叠 → Unicode 规范化 → 大小写映射 → 空白折叠 → 首尾清理。含多个列时使用 U+001F 作为复合键分隔符，并检查分隔符歧义。</p>
+      <p class="note">变换顺序固定为：移除 Cf 不可见字符 → 宽度折叠 → Unicode 规范化 → 大小写映射（默认 locale-neutral；opt-in 语言身份合同下 tr/az 使用固定 Unicode 版本的全字符串上下文 SpecialCasing 映射）→ 空白折叠 → 首尾清理。含多个列时使用 U+001F 作为复合键分隔符，并检查分隔符歧义。</p>
     </div>
   </section>
-
+{language_section}
   <section class="section" id="collisions">
     <div class="section-head"><h2>唯一键碰撞组</h2><p>业务必须逐组裁决，工具不自动合并</p></div>
     {''.join(collision_cards)}

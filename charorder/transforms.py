@@ -10,6 +10,261 @@ from typing import Any
 
 from .models import TransformSpec
 
+# ---------------------------------------------------------------------------
+# Language-specific casing (Turkish ``tr`` / Azerbaijani ``az``)
+#
+# These mappings implement the *context-aware* rules of Unicode SpecialCasing.txt
+# and are pinned to the Unicode database version bundled with the running
+# interpreter (see charorder.UNICODE_VERSION / unicodedata.unidata_version). They
+# are full-string mappings, not character substitutions: the dotted capital
+# ``I`` + U+0307 sequence is a two-codepoint context, and U+0307 is removed
+# after any soft-dotted character (SpecialCasing: "After_Soft_Dotted"). A naive
+# ``text.replace("I", "ı")`` cannot express either rule, so it must not be used
+# to claim Turkic support.
+#
+# Reference (SpecialCasing.txt, Unicode 14.0):
+#   tr/az lower: U+0049 -> U+0131 ; U+0130 -> U+0069 ; U+0049+0307 -> U+0069
+#   tr/az upper: U+0069 -> U+0130 ; U+0131 -> U+0049
+# ---------------------------------------------------------------------------
+
+TURKIC_LANGUAGES = frozenset({"tr", "az"})
+
+# Exact Soft_Dotted enumeration from PropList.txt for the pinned Unicode
+# version (56 code points in Unicode 14.0). Soft-dotted characters lose an
+# immediately following combining dot above on lowercasing. The literal is
+# kept verbatim (rather than derived at runtime) so the mapping is fixed to
+# one auditable Unicode data version, matching charorder.UNICODE_VERSION.
+_SOFT_DOTTED = frozenset(
+    "ijıȷɟɨᵢᶖᶤᶨḭḯṧṩịἀἁἂἃἄἅἆἇᾰᾱῐῑῠῡⁱⅈⅉⱼ𝐢𝐣𝑖𝑗𝒊𝒋𝓮𝔢𝔣𝕖𝕗𝖊𝖋𝗂𝗃𝗶𝗷𝘪𝘫𝙞𝙟𝚒𝚓"
+)
+_DOT_ABOVE = "̇"  # U+0307 COMBINING DOT ABOVE
+_CAPITAL_I = "I"  # U+0049 LATIN CAPITAL LETTER I
+_DOTTED_CAPITAL_I = "İ"  # U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE
+_DOTLESS_LOWER_I = "ı"  # U+0131 LATIN SMALL LETTER DOTLESS I
+_SMALL_I = "i"  # U+0069 LATIN SMALL LETTER I
+
+# Codepoints whose key equivalence depends on which casing semantics apply.
+# U+0307 is listed because its behaviour changes after soft-dotted letters and
+# when it occurs as the decomposed form of U+0130.
+TURKIC_CASE_SENSITIVE_CODEPOINTS = frozenset(
+    {_CAPITAL_I, _DOTTED_CAPITAL_I, _DOTLESS_LOWER_I, _SMALL_I, _DOT_ABOVE}
+)
+
+
+def contains_turkic_sensitive_codepoints(text: str) -> bool:
+    """Return True if *text* contains any I-family codepoint governed by tr/az.
+
+    The check works on raw input: it does not depend on normalization order,
+    so both the precomposed ``İ`` and the decomposed ``I``+U+0307 forms are
+    detected.
+    """
+
+    return any(ch in TURKIC_CASE_SENSITIVE_CODEPOINTS for ch in text)
+
+
+def turkic_lower(text: str) -> str:
+    """Full-string-context lowercase for Turkish/Azerbaijani.
+
+    Implements the tr/az conditional mappings of SpecialCasing.txt:
+
+    * ``I`` -> ``ı`` (U+0131), except ``I`` + U+0307 -> ``i`` (Before_Dot);
+    * ``İ`` (U+0130) -> ``i``;
+    * U+0307 following a soft-dotted character is removed (After_Soft_Dotted);
+    * every other codepoint follows the default Unicode lowercase mapping.
+    """
+
+    out: list[str] = []
+    for index, ch in enumerate(text):
+        if ch == _DOT_ABOVE:
+            if index > 0:
+                predecessor = text[index - 1]
+                if predecessor == _CAPITAL_I:
+                    # I+0307 is the NFD form of İ: the Before_Dot branch
+                    # already emitted plain i, so this dot is consumed.
+                    continue
+                # After_Soft_Dotted (SpecialCasing.txt): test the lowercase
+                # form of the *original* predecessor, since the Soft_Dotted
+                # property list is defined on lowercase letters while input
+                # may be uppercase.
+                lowered_predecessor = predecessor.lower()
+                if (
+                    len(lowered_predecessor) == 1
+                    and lowered_predecessor in _SOFT_DOTTED
+                ):
+                    continue
+            out.append(ch)
+        elif ch == _CAPITAL_I:
+            if index + 1 < len(text) and text[index + 1] == _DOT_ABOVE:
+                # I+0307 lowercases to i; the following dot is consumed by
+                # the U+0307 branch above.
+                out.append(_SMALL_I)
+            else:
+                out.append(_DOTLESS_LOWER_I)
+        elif ch == _DOTTED_CAPITAL_I:
+            out.append(_SMALL_I)
+        else:
+            out.append(ch.lower())
+    return "".join(out)
+
+
+def turkic_upper(text: str) -> str:
+    """Full-string-context uppercase for Turkish/Azerbaijani.
+
+    Implements the unconditional tr/az mappings from SpecialCasing.txt:
+
+    * ``i`` -> ``İ`` (U+0130);
+    * ``ı`` (U+0131) -> ``I``;
+    * every other codepoint follows the default Unicode uppercase mapping.
+    """
+
+    out: list[str] = []
+    for ch in text:
+        if ch == _SMALL_I:
+            out.append(_DOTTED_CAPITAL_I)
+        elif ch == _DOTLESS_LOWER_I:
+            out.append(_CAPITAL_I)
+        else:
+            out.append(ch.upper())
+    return "".join(out)
+
+
+def turkic_casefold(text: str) -> str:
+    """Casefold for Turkish/Azerbaijani.
+
+    The tr/az contract lowercases with the full-context mapping first, then
+    applies the default casefold to the remainder (e.g. German ß -> ss). The
+    I-family is already resolved by ``turkic_lower`` so the locale-neutral
+    casefold can never reintroduce the wrong ``i``/``ı`` collapse.
+    """
+
+    return turkic_lower(text).casefold()
+
+
+@dataclass(frozen=True)
+class TraceStage:
+    """One fixed-order pipeline stage and the codepoints it produced."""
+
+    stage: str
+    applied: bool
+    output_codepoints: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "applied": self.applied,
+            "output_codepoints": list(self.output_codepoints),
+        }
+
+
+@dataclass(frozen=True)
+class TransformTrace:
+    """Codepoint-level audit trail of one component through the pipeline."""
+
+    component_index: int
+    raw_codepoints: tuple[str, ...]
+    stages: tuple[TraceStage, ...]
+    final_codepoints: tuple[str, ...]
+    language: str | None
+    case_contract: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "component_index": self.component_index,
+            "language": self.language,
+            "case_contract": self.case_contract,
+            "raw_codepoints": list(self.raw_codepoints),
+            "final_codepoints": list(self.final_codepoints),
+            "stages": [stage.to_dict() for stage in self.stages],
+        }
+
+
+def codepoint_labels(text: str) -> tuple[str, ...]:
+    return tuple(f"U+{ord(ch):04X}" for ch in text)
+
+
+def apply_transform_traced(
+    value: str,
+    spec: TransformSpec,
+    *,
+    language: str | None = None,
+) -> tuple[str, TransformTrace]:
+    """Apply the declared key pipeline and return a codepoint trace.
+
+    The stage order is fixed and documented:
+
+    1. remove Cf invisible characters (when declared);
+    2. East Asian width folding (when declared);
+    3. Unicode normalization (NFC/NFD/NFKC/NFKD, when declared);
+    4. case mapping -- locale-neutral by default, or the full-context tr/az
+       mapping when *language* is a supported Turkic language and the rule
+       opted into a language policy;
+    5. whitespace collapsing (when declared);
+    6. end trimming (when declared).
+    """
+
+    text = value
+    stages: list[TraceStage] = []
+
+    def record(stage: str, applied: bool, current: str) -> None:
+        stages.append(
+            TraceStage(
+                stage=stage,
+                applied=applied,
+                output_codepoints=codepoint_labels(current),
+            )
+        )
+
+    applied_invisible = spec.invisible == "remove"
+    if applied_invisible:
+        text = _remove_invisible(text)
+    record("invisible_remove", applied_invisible, text)
+
+    if spec.width_fold:
+        text = fold_width(text)
+    record("width_fold", spec.width_fold, text)
+
+    if spec.normalization != "none":
+        text = unicodedata.normalize(spec.normalization, text)
+    record(f"normalize_{spec.normalization}", spec.normalization != "none", text)
+
+    case_contract = "neutral"
+    if spec.case != "none":
+        if language in TURKIC_LANGUAGES:
+            case_contract = f"turkic_{language}"
+            if spec.case == "casefold":
+                text = turkic_casefold(text)
+            elif spec.case == "lower":
+                text = turkic_lower(text)
+            else:  # upper
+                text = turkic_upper(text)
+        else:
+            case_contract = "neutral"
+            if spec.case == "casefold":
+                text = text.casefold()
+            elif spec.case == "lower":
+                text = text.lower()
+            elif spec.case == "upper":
+                text = text.upper()
+    record(f"case_{spec.case}", spec.case != "none", text)
+
+    if spec.collapse_whitespace:
+        text = re.sub(r"\s+", " ", text, flags=re.UNICODE)
+    record("collapse_whitespace", spec.collapse_whitespace, text)
+
+    if spec.trim:
+        text = text.strip()
+    record("trim", spec.trim, text)
+
+    trace = TransformTrace(
+        component_index=0,
+        raw_codepoints=codepoint_labels(value),
+        stages=tuple(stages),
+        final_codepoints=codepoint_labels(text),
+        language=language,
+        case_contract=case_contract,
+    )
+    return text, trace
+
 UNIT_SEPARATOR = "\x1f"
 
 _MOJIBAKE_RE = re.compile(r"(?:Ã[\u0080-¿]|Â[\u0080-¿]|â€[\u0080-™]|ï»¿)")
@@ -83,31 +338,30 @@ def _remove_invisible(text: str) -> str:
     return "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
 
 
-def apply_transform(value: str, spec: TransformSpec) -> str:
-    """Apply the declared key pipeline in a fixed, documented order."""
+def apply_transform(
+    value: str, spec: TransformSpec, *, language: str | None = None
+) -> str:
+    """Apply the declared key pipeline in a fixed, documented order.
 
-    text = value
-    if spec.invisible == "remove":
-        text = _remove_invisible(text)
-    if spec.width_fold:
-        text = fold_width(text)
-    if spec.normalization != "none":
-        text = unicodedata.normalize(spec.normalization, text)
-    if spec.case == "casefold":
-        text = text.casefold()
-    elif spec.case == "lower":
-        text = text.lower()
-    elif spec.case == "upper":
-        text = text.upper()
-    if spec.collapse_whitespace:
-        text = re.sub(r"\s+", " ", text, flags=re.UNICODE)
-    if spec.trim:
-        text = text.strip()
-    return text
+    With no *language* (or an unsupported one) the behaviour is the original
+    locale-neutral pipeline. Pass a ``tr``/``az`` tag to use the full-string
+    Turkic casing contract when the rule's transform opted into one.
+    """
+
+    transformed, _trace = apply_transform_traced(value, spec, language=language)
+    return transformed
 
 
-def make_target_key(components: list[str], spec: TransformSpec) -> str:
-    transformed = [apply_transform(component, spec) for component in components]
+def make_target_key(
+    components: list[str],
+    spec: TransformSpec,
+    *,
+    language: str | None = None,
+) -> str:
+    transformed = [
+        apply_transform(component, spec, language=language)
+        for component in components
+    ]
     return UNIT_SEPARATOR.join(transformed)
 
 

@@ -145,8 +145,8 @@ def _verify_ledger(
     try:
         connection.execute("PRAGMA query_only = ON")
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version != 1:
-            errors.append(f"台账 user_version 应为 1，实际为 {version}。")
+        if version != 2:
+            errors.append(f"台账 user_version 应为 2，实际为 {version}。")
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
             errors.append(f"SQLite integrity_check 未通过：{integrity}")

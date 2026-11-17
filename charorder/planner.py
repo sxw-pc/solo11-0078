@@ -26,6 +26,7 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
     rule_stats = {item["rule_id"]: item for item in summary["rules"]}
 
     rules: list[dict[str, Any]] = []
+    language_buckets = summary.get("language_preflight", {}).get("rules", {})
     for rule in config.keys:
         stats = rule_stats[rule.id]
         rule_high = stats["findings_by_severity"].get("high", 0)
@@ -38,36 +39,37 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             status = "review"
         else:
             status = "ready"
-        rules.append(
-            {
-                "rule_id": rule.id,
-                "label": rule.label,
-                "source_id": rule.source_id,
-                "columns": list(rule.columns),
-                "destination": rule.destination,
-                "unique": rule.unique,
-                "required": rule.required,
-                "max_bytes": rule.max_bytes,
-                "max_chars": rule.max_chars,
-                "transform": rule.transform.as_dict(),
-                "transform_text": rule.transform.describe(),
-                "status": status,
-                "records": stats["records"],
-                "non_null_keys": stats["non_null_keys"],
-                "changed_keys": stats["changed_keys"],
-                "collision_groups": stats["collision_groups"],
-                "collision_records": stats["collision_records"],
-                "overlength": stats["overlength"],
-                "findings_by_severity": stats["findings_by_severity"],
-                "blocking_codes": sorted(
-                    {
-                        finding.code
-                        for finding in high_findings
-                        if finding.rule_id == rule.id
-                    }
-                ),
-            }
-        )
+        rule_entry = {
+            "rule_id": rule.id,
+            "label": rule.label,
+            "source_id": rule.source_id,
+            "columns": list(rule.columns),
+            "destination": rule.destination,
+            "unique": rule.unique,
+            "required": rule.required,
+            "max_bytes": rule.max_bytes,
+            "max_chars": rule.max_chars,
+            "transform": rule.transform.as_dict(),
+            "transform_text": rule.transform.describe(),
+            "status": status,
+            "records": stats["records"],
+            "non_null_keys": stats["non_null_keys"],
+            "changed_keys": stats["changed_keys"],
+            "collision_groups": stats["collision_groups"],
+            "collision_records": stats["collision_records"],
+            "overlength": stats["overlength"],
+            "findings_by_severity": stats["findings_by_severity"],
+            "blocking_codes": sorted(
+                {
+                    finding.code
+                    for finding in high_findings
+                    if finding.rule_id == rule.id
+                }
+            ),
+        }
+        if rule.id in language_buckets:
+            rule_entry["language_contract"] = language_buckets[rule.id]
+        rules.append(rule_entry)
 
     collision_steps = []
     for collision in result.collisions[:20]:
@@ -123,14 +125,21 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
         {
             "order": 2,
             "phase": "canonicalize",
-            "title": "固化目标排序键变换",
+            "title": "固化目标排序键变换与语言身份合同",
             "status": "done",
             "detail": (
                 f"按 {summary['key_rule_count']} 条声明式规则生成 "
                 f"{summary['keys_evaluated']} 个目标键；"
                 f"{summary['changed_keys']} 个键经过归一化或折叠后发生变化。"
+                + (
+                    "已启用语言身份预检的规则按 neutral_only / language_aware "
+                    "合同分别重算，tr/az 记录使用固定 Unicode 版本的全字符串上下文 "
+                    "SpecialCasing 映射，无语言声明的规则保持 locale-neutral 语义。"
+                    if summary.get("language_preflight", {}).get("rules")
+                    else "未声明语言身份合同，全部规则保持 locale-neutral 语义。"
+                )
             ),
-            "acceptance": "目标库排序规则与计划中的 binary UTF-8 键语义一致，不使用系统 locale。",
+            "acceptance": "目标库排序规则与计划中的 binary UTF-8 键语义一致，不使用系统 locale；语言标签来源、合同与每条键的码位轨迹可在台账与 keys.jsonl 复核。",
             "evidence": ["plan.json", "keys.jsonl"],
         },
         {
@@ -242,8 +251,16 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             },
             "collision_groups": summary["collision_groups"],
             "collision_records": summary["collision_records"],
+            "cross_language_collision_groups": summary.get(
+                "cross_language_collision_groups", 0
+            ),
             "overlength_keys": summary["overlength_keys"],
         },
+        **(
+            {"language_contracts": summary["language_preflight"]}
+            if summary.get("language_preflight", {}).get("rules")
+            else {}
+        ),
         "source_fingerprints": [
             {
                 "source_id": source["source_id"],
@@ -271,6 +288,8 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "不得自动“修复”疑似乱码而覆盖原值",
             "不得把校验失败的目标键直接写入生产唯一索引",
             "不得将源文件或 SQLite 台账当作可回写数据源",
+            "不得在缺失、冲突或不受支持的语言标签上猜测 Turkic 键等价类",
+            "不得以语言标签为由掩盖共享目标索引内的跨语言同键碰撞",
         ],
         "reproduce": {
             "config_file": config.config_path.name,

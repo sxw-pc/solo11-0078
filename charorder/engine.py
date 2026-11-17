@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -25,8 +27,10 @@ from .models import (
 from .planner import build_plan
 from .transforms import (
     UNIT_SEPARATOR,
+    TURKIC_LANGUAGES,
     analyze_text,
-    apply_transform,
+    apply_transform_traced,
+    contains_turkic_sensitive_codepoints,
     escaped_text,
     format_raw_values,
     has_unit_separator,
@@ -38,6 +42,38 @@ from .transforms import (
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _resolve_language(
+    rule: KeyRule, record: SourceRecord
+) -> tuple[str | None, str]:
+    """Resolve the verifiable language tag for one record.
+
+    Returns ``(primary_subtag_or_None, status)`` where status is one of
+    ``declared`` (unified source), ``resolved`` (record field), ``missing``,
+    ``invalid`` or ``unsupported``. A rule without a language policy returns
+    ``(None, "not_configured")`` and never blocks the legacy pipeline.
+    """
+
+    policy = rule.transform.language_policy
+    if policy is None:
+        return None, "not_configured"
+
+    if policy.default_language is not None:
+        return policy.default_language, "declared"
+
+    raw = record.values.get(policy.tag_field)
+    if raw is None:
+        return None, "missing"
+    text = str(raw).strip()
+    if not text:
+        return None, "missing"
+    if not re.fullmatch(r"[a-zA-Z]{2,3}(?:-[A-Za-z0-9]+)*", text):
+        return None, "invalid"
+    primary = text.split("-", 1)[0].lower()
+    if primary not in policy.supported_languages:
+        return primary, "unsupported"
+    return primary, "resolved"
 
 
 def compute_run_id(config: AppConfig, loads: Iterable[SourceLoad]) -> str:
@@ -224,6 +260,15 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
             if len(raw_variants_set) > 1
             else "DUPLICATE_KEY"
         )
+        # Language tags never hide a collision: records sharing one target key
+        # are grouped regardless of their declared language.
+        languages = sorted(
+            {
+                participant.language_tag or "unknown"
+                for participant in participants
+            }
+        )
+        cross_language = len(languages) > 1
         group_id = _collision_id(run_id, rule_id, target_key)
         for participant in participants:
             participant.collision_group_id = group_id
@@ -241,6 +286,8 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
                     for participant in participants
                 }
             ),
+            languages=languages,
+            cross_language=cross_language,
         )
         collisions.append(group)
         add_finding(
@@ -248,6 +295,11 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
             (
                 f"唯一键 {rule_id} 有 {len(participants)} 条记录映射到同一目标键 "
                 f"{group.target_key_escaped}，需业务仲裁后再建唯一索引"
+                + (
+                    f"；该碰撞跨语言标签 {languages}，语言身份不得掩盖跨语言同键"
+                    if cross_language
+                    else ""
+                )
             ),
             source_id=rule.source_id,
             rule_id=rule_id,
@@ -257,10 +309,15 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
                 "target_key_escaped": group.target_key_escaped,
                 "record_count": len(participants),
                 "distinct_raw_count": len(raw_variants_set),
+                "languages": languages,
+                "cross_language": cross_language,
                 "sample_participants": [
                     {
                         "record_ref": participant.record_ref,
                         "record_id": participant.record_id,
+                        "language_tag": participant.language_tag,
+                        "language_status": participant.language_status,
+                        "case_contract": participant.case_contract,
                         "raw_display": participant.raw_display,
                     }
                     for participant in participants[:20]
@@ -268,6 +325,24 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
             },
             severity=config.severity_for(reason),
         )
+        if cross_language:
+            add_finding(
+                "CROSS_LANGUAGE_COLLISION",
+                (
+                    f"唯一键 {rule_id} 的目标键 {group.target_key_escaped} "
+                    f"被不同语言标签的记录共享：{languages}；"
+                    "共享目标索引内的跨语言碰撞必须按真实碰撞处理"
+                ),
+                source_id=rule.source_id,
+                rule_id=rule_id,
+                details={
+                    "group_id": group_id,
+                    "target_key_escaped": group.target_key_escaped,
+                    "languages": languages,
+                    "record_count": len(participants),
+                },
+                severity=config.severity_for("CROSS_LANGUAGE_COLLISION"),
+            )
 
     findings.sort(
         key=lambda finding: (
@@ -345,17 +420,122 @@ def _evaluate_key(
                 )
             )
 
+    # --- Language identity preflight (explicit opt-in) --------------------
+    language_tag, language_status = _resolve_language(rule, record)
+    policy = rule.transform.language_policy
+    use_turkic_mapping = False
+    present_components = [
+        component for component in raw_components if component is not None
+    ]
+    value_is_turkic_sensitive = any(
+        contains_turkic_sensitive_codepoints(component)
+        for component in present_components
+    )
+
+    if policy is not None:
+        if language_status in {"missing", "invalid"}:
+            code = (
+                "LANGUAGE_TAG_MISSING"
+                if language_status == "missing"
+                else "LANGUAGE_TAG_INVALID"
+            )
+            source_desc = (
+                f"记录字段 {policy.tag_field}"
+                if policy.tag_field
+                else f"统一声明 {policy.default_language}"
+            )
+            defects.append(
+                Defect(
+                    code=code,
+                    severity=config.severity_for(code),
+                    message=(
+                        f"键 {rule.id} 的语言身份标签"
+                        + ("缺失" if language_status == "missing" else "格式非法")
+                        + f"（来源：{source_desc}）；不得猜测 Turkic 键等价类，"
+                        "该记录按语言中性映射保留并阻断迁移"
+                    ),
+                    details={
+                        "tag_field": policy.tag_field,
+                        "default_language": policy.default_language,
+                        "contract": policy.contract,
+                    },
+                    column=policy.tag_field,
+                )
+            )
+        elif language_status == "unsupported":
+            if value_is_turkic_sensitive:
+                defects.append(
+                    Defect(
+                        code="LANGUAGE_TAG_UNSUPPORTED",
+                        severity=config.severity_for("LANGUAGE_TAG_UNSUPPORTED"),
+                        message=(
+                            f"键 {rule.id} 的记录语言标签 {language_tag!r} 不在声明支持范围 "
+                            f"{sorted(policy.supported_languages)} 内，且原值含 I/İ/ı/i 或 "
+                            "U+0307；无合同可证其大小写等价类，按语言中性映射保留并阻断迁移"
+                        ),
+                        details={
+                            "language_tag": language_tag,
+                            "supported_languages": list(policy.supported_languages),
+                            "contract": policy.contract,
+                        },
+                        column=policy.tag_field,
+                    )
+                )
+        elif language_status in {"resolved", "declared"} and language_tag in TURKIC_LANGUAGES:
+            if policy.contract == "neutral_only":
+                if value_is_turkic_sensitive:
+                    defects.append(
+                        Defect(
+                            code="TURKIC_CASE_GOVERNANCE_REQUIRED",
+                            severity=config.severity_for(
+                                "TURKIC_CASE_GOVERNANCE_REQUIRED"
+                            ),
+                            message=(
+                                f"记录声明语言 {language_tag}，原值含 I/İ/ı/i 或 U+0307；"
+                                f"neutral_only 合同不放行 locale-neutral 小写结果，"
+                                "须先在源系统完成 Turkic 大小写治理，或改用 language_aware 合同"
+                            ),
+                            details={
+                                "language_tag": language_tag,
+                                "contract": policy.contract,
+                                "sensitive_codepoints": sorted(
+                                    {
+                                        f"U+{ord(ch):04X}"
+                                        for component in present_components
+                                        for ch in component
+                                        if contains_turkic_sensitive_codepoints(ch)
+                                    }
+                                ),
+                            },
+                        )
+                    )
+            else:  # language_aware with a verifiable tr/az tag
+                use_turkic_mapping = True
+
     target_key: str | None = None
     target_escaped: str | None = None
     key_hash: str | None = None
     key_bytes = 0
     key_chars = 0
     changed = False
+    traces: list[Any] = []
+    case_contract = "neutral"
 
     if not missing_columns:
         assert all(component is not None for component in raw_components)
         components = [component for component in raw_components if component is not None]
-        transformed = [apply_transform(component, rule.transform) for component in components]
+        mapping_language = language_tag if use_turkic_mapping else None
+        transformed: list[str] = []
+        for component_index, component in enumerate(components):
+            mapped, trace = apply_transform_traced(
+                component, rule.transform, language=mapping_language
+            )
+            # The trace index is positional relative to the key components.
+            traces.append(
+                replace(trace, component_index=component_index)
+            )
+            transformed.append(mapped)
+        case_contract = traces[0].case_contract if traces else "neutral"
         changed = any(before != after for before, after in zip(components, transformed))
         for column, transformed_value in zip(rule.columns, transformed):
             if has_unit_separator(transformed_value):
@@ -437,6 +617,10 @@ def _evaluate_key(
         key_chars=key_chars,
         changed=changed,
         defects=defects,
+        language_tag=language_tag,
+        language_status=language_status,
+        case_contract=case_contract,
+        traces=traces,
     )
 
 
@@ -557,6 +741,10 @@ def _summarize(
         "findings_by_code": dict(sorted(code_counts.items())),
         "collision_groups": len(collisions),
         "collision_records": sum(len(group.participants) for group in collisions),
+        "cross_language_collision_groups": sum(
+            1 for group in collisions if group.cross_language
+        ),
+        "language_preflight": _language_preflight_summary(config, results),
         "overlength_keys": sum(
             1
             for result in results
@@ -571,6 +759,68 @@ def _summarize(
         "input_sha256": {
             load.spec.id: load.sha256 for load in loads
         },
+    }
+
+
+def _language_preflight_summary(
+    config: AppConfig, results: list[KeyResult]
+) -> dict[str, Any]:
+    """Per-rule language contract statistics over the whole record set."""
+
+    rules: dict[str, Any] = {}
+    totals = Counter()
+    for result in results:
+        rule = config.key_map[result.rule_id]
+        policy = rule.transform.language_policy
+        if policy is None:
+            continue
+        bucket = rules.setdefault(
+            result.rule_id,
+            {
+                "contract": policy.contract,
+                "tag_field": policy.tag_field,
+                "default_language": policy.default_language,
+                "supported_languages": list(policy.supported_languages),
+                "records": 0,
+                "by_status": Counter(),
+                "by_language": Counter(),
+                "turkic_mapped": 0,
+                "neutral_mapped": 0,
+                "blocked_by_language": 0,
+                "migratable": 0,
+            },
+        )
+        bucket["records"] += 1
+        bucket["by_status"][result.language_status] += 1
+        totals[result.language_status] += 1
+        if result.language_tag:
+            bucket["by_language"][result.language_tag] += 1
+        if result.case_contract in {"turkic_tr", "turkic_az"}:
+            bucket["turkic_mapped"] += 1
+        else:
+            bucket["neutral_mapped"] += 1
+        language_blocks = {
+            "LANGUAGE_TAG_MISSING",
+            "LANGUAGE_TAG_INVALID",
+            "LANGUAGE_TAG_UNSUPPORTED",
+            "TURKIC_CASE_GOVERNANCE_REQUIRED",
+        }
+        blocked = any(defect.code in language_blocks for defect in result.defects)
+        if blocked:
+            bucket["blocked_by_language"] += 1
+        elif result.target_key is not None:
+            bucket["migratable"] += 1
+
+    serialized: dict[str, Any] = {}
+    for rule_id, bucket in sorted(rules.items()):
+        serialized[rule_id] = {
+            **{key: value for key, value in bucket.items() if not isinstance(value, Counter)},
+            "by_status": dict(sorted(bucket["by_status"].items())),
+            "by_language": dict(sorted(bucket["by_language"].items())),
+        }
+    return {
+        "totals_by_status": dict(sorted(totals.items())),
+        "rules": serialized,
     }
 
 

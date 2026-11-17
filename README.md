@@ -103,7 +103,7 @@ charorder/
 1. 按需移除 `Cf` 类不可见格式字符；
 2. 宽度折叠：仅将 East Asian Width 为 `F` / `H` 的字符做 NFKC 宽度形式折叠；
 3. 应用声明的 Unicode 规范化：`NFC` / `NFD` / `NFKC` / `NFKD` / `none`；
-4. 应用大小写映射：`casefold` / `lower` / `upper` / `none`；
+4. 应用大小写映射：`casefold` / `lower` / `upper` / `none`。默认始终是 Python 的 locale-neutral 映射；仅当规则显式 opt-in 语言身份合同且记录标签可核验为 `tr`/`az` 时，才改用固定 Unicode 数据版本的全字符串上下文 SpecialCasing 映射（见 5.5）；
 5. 如启用，则将全部 Unicode 空白折叠为单个 ASCII 空格；
 6. 如启用，清理首尾空白；
 7. 单列直接成为目标键；复合列使用 `U+001F`（unit separator）连接；
@@ -231,6 +231,30 @@ charorder/
 
 复合键固定使用 ASCII Unit Separator `U+001F`。若某个变换后的分量本身包含该字符，会生成高等级 `COMPOSITE_SEPARATOR` 风险，避免静默产生歧义键。
 
+### 5.5 语言身份键预检（opt-in，tr/az Turkic 特殊大小写）
+
+土耳其语（`tr`）与阿塞拜疆语（`az`）的大小写合同与 locale-neutral 规则不同：`I` 小写为 `ı`（U+0131），`İ`（U+0130）小写为 `i`，分解形式 `I`+U+0307 属于双码位上下文，且 U+0307 在任意 soft-dotted 字符之后要被吸收（SpecialCasing 的 `After_Soft_Dotted` 规则）。简单的 `replace('I', 'ı')` 无法表达这些上下文，本工具不采用该做法，而是按运行时固定的 Unicode 数据版本实现完整字符串上下文映射，映射版本随 `UNICODE_VERSION` 写入计划与台账。
+
+该能力默认关闭；不声明时所有规则保持原有 locale-neutral 行为。需要时在 `transform` 下增加 `language_policy`：
+
+```json
+"language_policy": {
+  "contract": "language_aware",
+  "tag_field": "lang",
+  "supported_languages": ["tr", "az"]
+}
+```
+
+- `contract`（必填）：
+  - `neutral_only`：保持现行语言中性目标语义。对声明为 `tr`/`az` 且原值含 `I`/`İ`/`ı`/`i` 或 U+0307 的记录产生高等级 `TURKIC_CASE_GOVERNANCE_REQUIRED`，阻断迁移并要求先在源系统治理；不放行错误的默认 lowercase 结果。
+  - `language_aware`：仅当语言标签充分且可核验时，对 `tr`/`az` 记录用 Turkic 全上下文映射生成目标键并重算全部计划数据（目标键、UTF-8 长度、碰撞、码位轨迹）。
+- 语言标签来源二选一，互斥且必填其一：
+  - `tag_field`：记录中的可核验字段名（如 `lang`），接受 BCP 47 形式（`tr`、`az-Latn`、`tr-TR`），按主子标签归一化；
+  - `default_language`：规则级统一来源声明（如 `"tr"`），全部记录共享该身份。
+- `supported_languages`：目前仅允许 `tr` / `az`；其它语言标签走中性映射，不会被猜测为 Turkic 等价类。
+
+标签缺失（`LANGUAGE_TAG_MISSING`）、格式非法（`LANGUAGE_TAG_INVALID`）、或标签不受支持且原值含 Turkic 敏感码位（`LANGUAGE_TAG_UNSUPPORTED`）均为高等级阻断项；此时仍输出中性映射结果供审计，但不判定键等价类。不同语言记录若进入同一目标唯一索引，碰撞按真实碰撞分组并额外标记 `CROSS_LANGUAGE_COLLISION`，语言标签不会掩盖跨语言同键。
+
 ---
 
 ## 6. 输出产物
@@ -245,8 +269,8 @@ charorder/
 | `plan.md` | 迁移计划的人类可读版本 |
 | `findings.json` | 全量风险清单、严重级别和检查码计数 |
 | `collisions.json` | 全量碰撞组及参与者 |
-| `keys.jsonl` | 每条记录 × 每条规则的原始值、目标键、转义值、字节数、哈希、缺陷与碰撞组 ID |
-| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members 及视图） |
+| `keys.jsonl` | 每条记录 × 每条规则的原始值、目标键、转义值、字节数、哈希、缺陷、碰撞组 ID、语言标签/状态/大小写合同与逐阶段码位轨迹（`transform_traces`） |
+| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / key_transform_traces / findings / collisions / collision_members 及视图；schema `user_version=2`） |
 | `manifest.json` | 运行清单：产物哈希、计划哈希、源指纹、复跑命令 |
 
 默认输出目录为 `charorder-runs/<run-id>/`；显式传入 `--out` 可指定位置。目录非空时默认拒绝写入，需用 `--force` 覆盖已知产物名。工具不会清理目录中的未知文件。
@@ -294,6 +318,11 @@ WHERE m.group_id = 'C-...';
 | `COMPOSITE_SEPARATOR` | high | 变换后的分量含保留分隔符 `U+001F` |
 | `NORMALIZATION_COLLISION` | high | 不同原始值经变换后落入同一唯一键 |
 | `DUPLICATE_KEY` | high | 原始值本身相同，仍形成唯一键重复 |
+| `LANGUAGE_TAG_MISSING` | high | 语言身份合同要求的记录标签字段缺失或为空，不猜测键等价类 |
+| `LANGUAGE_TAG_INVALID` | high | 语言标签不符合 BCP 47 主子标签格式 |
+| `LANGUAGE_TAG_UNSUPPORTED` | high | 标签不在规则声明的支持语言内，且原值含 Turkic 敏感码位 |
+| `TURKIC_CASE_GOVERNANCE_REQUIRED` | high | `neutral_only` 合同下，tr/az 记录含 I/İ/ı/i 或 U+0307，需先治理 |
+| `CROSS_LANGUAGE_COLLISION` | high | 不同语言标签的记录共享同一目标唯一键，碰撞不因标签而豁免 |
 
 可在配置的 `severity_overrides` 中逐项覆盖。
 
