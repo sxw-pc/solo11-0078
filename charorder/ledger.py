@@ -41,7 +41,7 @@ def write_ledger(result: ScanResult, path: Path) -> None:
 def _create_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
         CREATE TABLE meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -61,7 +61,10 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             record_count INTEGER NOT NULL,
             key_result_count INTEGER NOT NULL,
             finding_count INTEGER NOT NULL,
-            collision_count INTEGER NOT NULL
+            collision_count INTEGER NOT NULL,
+            visual_candidate_count INTEGER NOT NULL,
+            visual_pending_reviews INTEGER NOT NULL,
+            visual_unknown_coverage INTEGER NOT NULL
         );
         CREATE TABLE sources (
             source_id TEXT PRIMARY KEY,
@@ -87,7 +90,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             is_required INTEGER NOT NULL,
             max_bytes INTEGER,
             max_chars INTEGER,
-            description TEXT NOT NULL
+            description TEXT NOT NULL,
+            script_policy_json TEXT NOT NULL
         );
         CREATE TABLE records (
             record_pk TEXT PRIMARY KEY,
@@ -115,7 +119,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             key_chars INTEGER NOT NULL,
             changed INTEGER NOT NULL,
             collision_group_id TEXT,
-            defects_json TEXT NOT NULL
+            defects_json TEXT NOT NULL,
+            visual_profile_json TEXT,
+            visual_candidate_ids_json TEXT NOT NULL
         );
         CREATE TABLE findings (
             finding_id TEXT PRIMARY KEY,
@@ -149,6 +155,56 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             record_id TEXT,
             PRIMARY KEY (group_id, key_result_id)
         );
+        CREATE TABLE visual_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            skeleton TEXT NOT NULL,
+            skeleton_escaped TEXT NOT NULL,
+            skeleton_sha256 TEXT NOT NULL,
+            skeleton_version TEXT NOT NULL,
+            map_version TEXT NOT NULL,
+            policy_mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            cross_script INTEGER NOT NULL,
+            unknown_coverage INTEGER NOT NULL,
+            conclusion TEXT,
+            reviewer TEXT,
+            review_note TEXT,
+            decided_at TEXT,
+            record_count INTEGER NOT NULL
+        );
+        CREATE TABLE visual_candidate_members (
+            candidate_id TEXT NOT NULL,
+            key_result_id TEXT NOT NULL,
+            record_ref TEXT NOT NULL,
+            record_id TEXT,
+            target_key TEXT NOT NULL,
+            target_key_escaped TEXT NOT NULL,
+            target_key_sha256 TEXT NOT NULL,
+            skeleton TEXT NOT NULL,
+            scripts_json TEXT NOT NULL,
+            codepoints_json TEXT NOT NULL,
+            coverage TEXT NOT NULL,
+            mapping_chain_json TEXT NOT NULL,
+            PRIMARY KEY (candidate_id, key_result_id)
+        );
+        CREATE TABLE visual_reviews (
+            run_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            skeleton_sha256 TEXT NOT NULL,
+            conclusion TEXT NOT NULL,
+            reviewer TEXT NOT NULL,
+            note TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            map_version TEXT NOT NULL,
+            skeleton_version TEXT NOT NULL,
+            applied INTEGER NOT NULL,
+            coverage_unknown INTEGER NOT NULL,
+            PRIMARY KEY (run_id, rule_id, skeleton_sha256)
+        );
         CREATE INDEX ix_key_results_rule ON key_results (rule_id, target_key);
         CREATE INDEX ix_key_results_source ON key_results (source_id, record_ref);
         CREATE INDEX ix_findings_severity ON findings (severity, code);
@@ -156,6 +212,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX ix_findings_rule ON findings (rule_id);
         CREATE INDEX ix_collisions_rule ON collisions (rule_id);
         CREATE INDEX ix_collision_members_record ON collision_members (record_ref);
+        CREATE INDEX ix_visual_candidates_rule ON visual_candidates (rule_id, status);
+        CREATE INDEX ix_visual_members_key ON visual_candidate_members (key_result_id);
         CREATE VIEW finding_counts AS
             SELECT code, severity, COUNT(*) AS finding_count
             FROM findings
@@ -166,6 +224,12 @@ def _create_schema(connection: sqlite3.Connection) -> None:
                    SUM(record_count) AS record_count
             FROM collisions
             GROUP BY rule_id, source_id, reason_code
+            ORDER BY rule_id;
+        CREATE VIEW visual_candidate_summary AS
+            SELECT rule_id, source_id, status, risk_level, unknown_coverage,
+                   COUNT(*) AS group_count, SUM(record_count) AS record_count
+            FROM visual_candidates
+            GROUP BY rule_id, source_id, status, risk_level, unknown_coverage
             ORDER BY rule_id;
         """
     )
@@ -178,9 +242,21 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             ("app", APP_NAME),
             ("slug", APP_SLUG),
             ("version", __version__),
-            ("schema_version", "1"),
+            ("schema_version", "2"),
             ("run_id", result.run_id),
             ("ledger_written_at", result.generated_at),
+            (
+                "visual_skeleton_version",
+                result.summary["visual_confusable_map"]["skeleton_version"],
+            ),
+            (
+                "visual_map_version",
+                result.summary["visual_confusable_map"]["map_version"],
+            ),
+            (
+                "visual_map_sha256",
+                result.summary["visual_confusable_map"]["map_sha256"],
+            ),
         ],
     )
     summary = result.summary
@@ -190,8 +266,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
         INSERT INTO runs (
             run_id, app, slug, version, unicode_version, project, target,
             generated_at, config_path, config_sha256, verdict, record_count,
-            key_result_count, finding_count, collision_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            key_result_count, finding_count, collision_count,
+            visual_candidate_count, visual_pending_reviews, visual_unknown_coverage
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             result.run_id,
@@ -209,6 +286,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             summary["keys_evaluated"],
             summary["findings_total"],
             summary["collision_groups"],
+            summary["visual_candidate_groups"],
+            summary["visual_pending_reviews"],
+            summary["visual_unknown_coverage"],
         ),
     )
 
@@ -243,8 +323,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             INSERT INTO rules (
                 rule_id, label, source_id, columns_json, destination,
                 transform_json, is_unique, is_required, max_bytes, max_chars,
-                description
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                description, script_policy_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 rule.id,
@@ -258,6 +338,7 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 rule.max_bytes,
                 rule.max_chars,
                 rule.description,
+                _json(rule.script_policy.as_dict() if rule.script_policy else None),
             ),
         )
 
@@ -286,8 +367,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             key_result_id, run_id, source_id, rule_id, ordinal, record_ref,
             record_id, raw_values_json, raw_display, target_key,
             target_key_escaped, key_sha256, key_bytes, key_chars, changed,
-            collision_group_id, defects_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            collision_group_id, defects_json, visual_profile_json,
+            visual_candidate_ids_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -319,6 +401,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                         for defect in item.defects
                     ]
                 ),
+                _json(item.visual_profile) if item.visual_profile else None,
+                _json(list(item.visual_candidate_ids)),
             )
             for item in result.key_results
         ],
@@ -388,6 +472,112 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             for group in result.collisions
             for participant in group.participants
         ],
+    )
+
+    connection.executemany(
+        """
+        INSERT INTO visual_candidates (
+            candidate_id, run_id, rule_id, source_id, skeleton, skeleton_escaped,
+            skeleton_sha256, skeleton_version, map_version, policy_mode, status,
+            risk_level, cross_script, unknown_coverage, conclusion, reviewer,
+            review_note, decided_at, record_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                candidate.candidate_id,
+                result.run_id,
+                candidate.rule_id,
+                candidate.source_id,
+                candidate.skeleton,
+                candidate.skeleton_escaped,
+                candidate.skeleton_sha256,
+                candidate.skeleton_version,
+                candidate.map_version,
+                candidate.policy_mode,
+                candidate.status,
+                candidate.risk_level,
+                int(candidate.cross_script),
+                int(candidate.unknown_coverage),
+                candidate.conclusion,
+                candidate.reviewer,
+                candidate.review_note,
+                candidate.decided_at,
+                len(candidate.members),
+            )
+            for candidate in result.visual_candidates
+        ],
+    )
+    connection.executemany(
+        """
+        INSERT INTO visual_candidate_members (
+            candidate_id, key_result_id, record_ref, record_id, target_key,
+            target_key_escaped, target_key_sha256, skeleton, scripts_json,
+            codepoints_json, coverage, mapping_chain_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                candidate.candidate_id,
+                member["key_result_id"],
+                member["record_ref"],
+                member["record_id"],
+                member["target_key"],
+                member["target_key_escaped"],
+                member["target_key_sha256"],
+                member["skeleton_escaped"],
+                _json(member["scripts"]),
+                _json(member["codepoints"]),
+                member["coverage"],
+                _json(member.get("mapping_chain", [])),
+            )
+            for candidate in result.visual_candidates
+            for member in candidate.members
+        ],
+    )
+    applied = {
+        (candidate.rule_id, candidate.skeleton_sha256)
+        for candidate in result.visual_candidates
+        if candidate.status == "reviewed"
+    }
+    connection.executemany(
+        """
+        INSERT INTO visual_reviews (
+            run_id, rule_id, skeleton_sha256, conclusion, reviewer, note,
+            decided_at, map_version, skeleton_version, applied, coverage_unknown
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                result.run_id,
+                review.rule_id,
+                review.skeleton_sha256,
+                review.conclusion,
+                review.reviewer,
+                review.note,
+                review.decided_at,
+                review.map_version,
+                review.skeleton_version,
+                int((review.rule_id, review.skeleton_sha256) in applied),
+                _coverage_unknown_for_rule(result, review.rule_id),
+            )
+            for review in result.config.visual_reviews
+        ],
+    )
+
+
+def _coverage_unknown_for_rule(result: ScanResult, rule_id: str) -> int:
+    """1 when the given rule has at least one map-coverage-unknown finding.
+
+    Reviewing a candidate cannot certify a rule whose components contain
+    characters the bundled map cannot classify.
+    """
+
+    return int(
+        any(
+            finding.code == "VISUAL_COVERAGE_UNKNOWN" and finding.rule_id == rule_id
+            for finding in result.findings
+        )
     )
 
 

@@ -18,6 +18,7 @@ _REQUIRED_ARTIFACTS = {
     "plan.md",
     "findings.json",
     "collisions.json",
+    "visual_confusables.json",
     "keys.jsonl",
     "ledger.sqlite",
 }
@@ -124,6 +125,7 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
         "findings": ledger_summary.get("findings"),
         "key_results": ledger_summary.get("key_results"),
         "collision_groups": ledger_summary.get("collision_groups"),
+        "visual_candidates": ledger_summary.get("visual_candidates"),
         "ledger_integrity": ledger_summary.get("integrity_check"),
         "html_self_contained": True,
     }
@@ -145,15 +147,16 @@ def _verify_ledger(
     try:
         connection.execute("PRAGMA query_only = ON")
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version != 1:
-            errors.append(f"台账 user_version 应为 1，实际为 {version}。")
+        if version != 2:
+            errors.append(f"台账 user_version 应为 2，实际为 {version}。")
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
             errors.append(f"SQLite integrity_check 未通过：{integrity}")
 
         run = connection.execute(
-            "SELECT run_id, verdict, record_count, key_result_count, finding_count, collision_count "
-            "FROM runs LIMIT 1"
+            "SELECT run_id, verdict, record_count, key_result_count, finding_count, "
+            "collision_count, visual_candidate_count, visual_pending_reviews, "
+            "visual_unknown_coverage FROM runs LIMIT 1"
         ).fetchone()
         if run is None:
             errors.append("台账 runs 表为空。")
@@ -168,12 +171,18 @@ def _verify_ledger(
                 "key_results": int(run[3]),
                 "findings": int(run[4]),
                 "collision_groups": int(run[5]),
+                "visual_candidate_groups": int(run[6]),
+                "visual_pending_reviews": int(run[7]),
+                "visual_unknown_coverage": int(run[8]),
             }
             expectations = {
                 "records": summary.get("record_count"),
                 "key_results": summary.get("keys_evaluated"),
                 "findings": summary.get("findings_total"),
                 "collision_groups": summary.get("collision_groups"),
+                "visual_candidate_groups": summary.get("visual_candidate_groups"),
+                "visual_pending_reviews": summary.get("visual_pending_reviews"),
+                "visual_unknown_coverage": summary.get("visual_unknown_coverage"),
             }
             for key, expected in expectations.items():
                 if counts.get(key) != expected:
@@ -193,6 +202,12 @@ def _verify_ledger(
         actual_members = connection.execute(
             "SELECT COUNT(*) FROM collision_members"
         ).fetchone()[0]
+        actual_visual = connection.execute(
+            "SELECT COUNT(*) FROM visual_candidates"
+        ).fetchone()[0]
+        actual_visual_members = connection.execute(
+            "SELECT COUNT(*) FROM visual_candidate_members"
+        ).fetchone()[0]
         if actual_findings != summary.get("findings_total"):
             errors.append("台账 findings 行数与 manifest 不一致。")
         if actual_keys != summary.get("keys_evaluated"):
@@ -201,11 +216,16 @@ def _verify_ledger(
             errors.append("台账 collisions 行数与 manifest 不一致。")
         if actual_members != summary.get("collision_records"):
             errors.append("台账 collision_members 行数与 manifest 不一致。")
+        if actual_visual != summary.get("visual_candidate_groups"):
+            errors.append("台账 visual_candidates 行数与 manifest 不一致。")
+        if actual_visual_members != summary.get("visual_candidate_records"):
+            errors.append("台账 visual_candidate_members 行数与 manifest 不一致。")
         return {
             "integrity_check": integrity,
             "findings": actual_findings,
             "key_results": actual_keys,
             "collision_groups": actual_collisions,
+            "visual_candidates": actual_visual,
         }
     except sqlite3.Error as exc:
         errors.append(f"台账校验查询失败：{exc}")

@@ -17,12 +17,22 @@ from .models import (
     AppConfig,
     KeyRule,
     ProjectSpec,
+    ScriptPolicy,
     SourceSpec,
     TransformSpec,
+    VisualReview,
 )
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_TOP_LEVEL = {"version", "project", "sources", "keys", "severity_overrides", "reports"}
+_TOP_LEVEL = {
+    "version",
+    "project",
+    "sources",
+    "keys",
+    "severity_overrides",
+    "reports",
+    "visual_reviews",
+}
 _PROJECT_FIELDS = {"name", "target", "description"}
 _SOURCE_FIELDS = {
     "id",
@@ -47,7 +57,33 @@ _KEY_FIELDS = {
     "required",
     "max_bytes",
     "max_chars",
+    "script_policy",
 }
+_SCRIPT_POLICY_FIELDS = {
+    "mode",
+    "allowed_scripts",
+    "namespace",
+    "reason",
+    "visual_review_required",
+}
+_SCRIPT_MODES = {"strict_script", "authorized_mixed"}
+_SCRIPT_NAME_RE = re.compile(r"^[A-Z][A-Za-z0-9_]{1,63}$")
+_VISUAL_REVIEW_FIELDS = {
+    "rule_id",
+    "skeleton_sha256",
+    "conclusion",
+    "reviewer",
+    "note",
+    "decided_at",
+    "map_version",
+    "skeleton_version",
+}
+_VISUAL_CONCLUSIONS = {
+    "distinct_verified",
+    "merge_required",
+    "migration_blocked",
+}
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TRANSFORM_FIELDS = {
     "normalization",
     "case",
@@ -157,6 +193,25 @@ def load_config(path: str | Path) -> AppConfig:
     ):
         raise ConfigError("reports.max_report_rows 必须是 1..100000 的整数。")
 
+    reviews_obj = data.get("visual_reviews", [])
+    if not isinstance(reviews_obj, list):
+        raise ConfigError("visual_reviews 必须是数组。")
+    visual_reviews: list[VisualReview] = []
+    seen_reviews: set[tuple[str, str]] = set()
+    for index, item in enumerate(reviews_obj):
+        review = _parse_visual_review(item, index)
+        pair = (review.rule_id, review.skeleton_sha256)
+        if pair in seen_reviews:
+            raise ConfigError(
+                f"visual_reviews[{index}] 重复记录同一规则与骨架：{review.rule_id}"
+            )
+        seen_reviews.add(pair)
+        if review.rule_id not in {key.id for key in keys}:
+            raise ConfigError(
+                f"visual_reviews[{index}].rule_id 指向不存在的键规则：{review.rule_id}"
+            )
+        visual_reviews.append(review)
+
     return AppConfig(
         version=1,
         project=project,
@@ -166,6 +221,49 @@ def load_config(path: str | Path) -> AppConfig:
         config_sha256=hashlib.sha256(raw).hexdigest(),
         severity_overrides=severity_overrides,
         max_report_rows=max_report_rows,
+        visual_reviews=tuple(visual_reviews),
+    )
+
+
+def _parse_visual_review(item: Any, index: int) -> VisualReview:
+    where = f"visual_reviews[{index}]"
+    obj = _require_object(item, where)
+    _reject_unknown(obj, _VISUAL_REVIEW_FIELDS, where)
+    rule_id = _require_id(obj.get("rule_id"), f"{where}.rule_id")
+    skeleton_sha256 = _require_nonempty_str(
+        obj.get("skeleton_sha256"), f"{where}.skeleton_sha256"
+    ).lower()
+    if not _SHA256_RE.fullmatch(skeleton_sha256):
+        raise ConfigError(f"{where}.skeleton_sha256 必须是 64 位小写十六进制 SHA-256。")
+    conclusion = _require_nonempty_str(
+        obj.get("conclusion"), f"{where}.conclusion"
+    ).lower()
+    if conclusion not in _VISUAL_CONCLUSIONS:
+        raise ConfigError(
+            f"{where}.conclusion 必须是 "
+            + " / ".join(sorted(_VISUAL_CONCLUSIONS))
+            + "。"
+        )
+    reviewer = _require_nonempty_str(obj.get("reviewer"), f"{where}.reviewer")
+    note = _optional_str(obj.get("note", ""), f"{where}.note")
+    decided_at = _optional_str(obj.get("decided_at", ""), f"{where}.decided_at")
+    map_version = _optional_str(obj.get("map_version", ""), f"{where}.map_version")
+    skeleton_version = _optional_str(
+        obj.get("skeleton_version", ""), f"{where}.skeleton_version"
+    )
+    if conclusion in {"merge_required", "migration_blocked"} and not note.strip():
+        raise ConfigError(
+            f"{where}.note 必须说明 {conclusion} 的处置理由。"
+        )
+    return VisualReview(
+        rule_id=rule_id,
+        skeleton_sha256=skeleton_sha256,
+        conclusion=conclusion,
+        reviewer=reviewer,
+        note=note,
+        decided_at=decided_at,
+        map_version=map_version,
+        skeleton_version=skeleton_version,
     )
 
 
@@ -274,6 +372,7 @@ def _parse_key(item: Any, index: int) -> KeyRule:
 
     max_bytes = _optional_positive_int(obj.get("max_bytes"), f"{where}.max_bytes")
     max_chars = _optional_positive_int(obj.get("max_chars"), f"{where}.max_chars")
+    script_policy = _parse_script_policy(obj.get("script_policy"), f"{where}.script_policy")
 
     return KeyRule(
         id=key_id,
@@ -287,6 +386,68 @@ def _parse_key(item: Any, index: int) -> KeyRule:
         required=required,
         max_bytes=max_bytes,
         max_chars=max_chars,
+        script_policy=script_policy,
+    )
+
+
+def _parse_script_policy(item: Any, where: str) -> ScriptPolicy | None:
+    if item is None:
+        return None
+    obj = _require_object(item, where)
+    _reject_unknown(obj, _SCRIPT_POLICY_FIELDS, where)
+    mode = _require_nonempty_str(obj.get("mode"), f"{where}.mode").lower()
+    if mode not in _SCRIPT_MODES:
+        raise ConfigError(
+            f"{where}.mode 必须是 strict_script 或 authorized_mixed。"
+        )
+    scripts_obj = obj.get("allowed_scripts")
+    if not isinstance(scripts_obj, list) or not scripts_obj:
+        raise ConfigError(f"{where}.allowed_scripts 必须是非空字符串数组。")
+    allowed: list[str] = []
+    for index, value in enumerate(scripts_obj):
+        name = _require_nonempty_str(value, f"{where}.allowed_scripts[{index}]")
+        if not _SCRIPT_NAME_RE.fullmatch(name):
+            raise ConfigError(
+                f"{where}.allowed_scripts[{index}] 不是合法 Unicode 文字体系名：{name}"
+            )
+        if name in allowed:
+            raise ConfigError(f"{where}.allowed_scripts 不能重复：{name}")
+        allowed.append(name)
+    if mode == "strict_script" and len(allowed) != 1:
+        raise ConfigError(
+            f"{where}：strict_script 必须且只能声明一个 allowed_scripts 条目。"
+        )
+    if mode == "authorized_mixed" and len(allowed) < 2:
+        raise ConfigError(
+            f"{where}：authorized_mixed 是跨体系授权，至少需要两个 allowed_scripts 条目。"
+        )
+    # Verify the declared names are actually known to the bundled map; that is
+    # what makes the authorization reviewable rather than free-form text.
+    from .transforms import load_confusable_map
+
+    known = set(load_confusable_map().script_ranges)
+    unknown = sorted(set(allowed) - known)
+    if unknown:
+        raise ConfigError(
+            f"{where}.allowed_scripts 含内置映射数据未收录的文字体系："
+            f"{', '.join(unknown)}；已收录：{', '.join(sorted(known))}"
+        )
+    namespace = _optional_str(obj.get("namespace", ""), f"{where}.namespace")
+    reason = _optional_str(obj.get("reason", ""), f"{where}.reason")
+    visual_review_required = _optional_bool(
+        obj.get("visual_review_required", True), f"{where}.visual_review_required"
+    )
+    if mode == "authorized_mixed" and not visual_review_required:
+        raise ConfigError(
+            f"{where}：authorized_mixed 不能关闭 visual_review_required；"
+            "跨体系视觉复核是强制项。"
+        )
+    return ScriptPolicy(
+        mode=mode,
+        allowed_scripts=tuple(allowed),
+        namespace=namespace,
+        reason=reason,
+        visual_review_required=visual_review_required,
     )
 
 

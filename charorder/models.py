@@ -31,6 +31,12 @@ DEFAULT_SEVERITIES: dict[str, str] = {
     "COMPOSITE_SEPARATOR": "high",
     "NORMALIZATION_COLLISION": "high",
     "DUPLICATE_KEY": "high",
+    # Visual-confusable evidence is deliberately a separate family from the
+    # byte-level collision codes above. These codes never replace
+    # NORMALIZATION_COLLISION / DUPLICATE_KEY for an exactly equal target_key.
+    "SCRIPT_NOT_AUTHORIZED": "high",
+    "VISUAL_CONFUSABLE_CANDIDATE": "medium",
+    "VISUAL_COVERAGE_UNKNOWN": "medium",
 }
 
 CHECK_CODES = tuple(DEFAULT_SEVERITIES.keys())
@@ -56,6 +62,9 @@ CHECK_LABELS: dict[str, str] = {
     "COMPOSITE_SEPARATOR": "复合键含保留分隔符",
     "NORMALIZATION_COLLISION": "归一化后唯一键碰撞",
     "DUPLICATE_KEY": "相同原始值唯一键重复",
+    "SCRIPT_NOT_AUTHORIZED": "未授权文字体系",
+    "VISUAL_CONFUSABLE_CANDIDATE": "跨键视觉混淆候选",
+    "VISUAL_COVERAGE_UNKNOWN": "视觉混淆映射覆盖未知",
 }
 
 VERDICT_LABEL = {
@@ -124,6 +133,32 @@ class TransformSpec:
 
 
 @dataclass(frozen=True)
+class ScriptPolicy:
+    """Authorization contract for scripts allowed in one target namespace.
+
+    ``strict_script`` permits exactly ``allowed_scripts`` and blocks any other
+    script. ``authorized_mixed`` explicitly authorizes a set of scripts for
+    mixed-script sources, but still requires manual visual review of
+    different-byte keys that share a visual skeleton.
+    """
+
+    mode: str  # "strict_script" | "authorized_mixed"
+    allowed_scripts: tuple[str, ...]
+    namespace: str = ""
+    reason: str = ""
+    visual_review_required: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "allowed_scripts": list(self.allowed_scripts),
+            "namespace": self.namespace,
+            "reason": self.reason,
+            "visual_review_required": self.visual_review_required,
+        }
+
+
+@dataclass(frozen=True)
 class KeyRule:
     id: str
     label: str
@@ -136,10 +171,37 @@ class KeyRule:
     required: bool = True
     max_bytes: int | None = None
     max_chars: int | None = None
+    script_policy: ScriptPolicy | None = None
 
     @property
     def composite(self) -> bool:
         return len(self.columns) > 1
+
+
+@dataclass(frozen=True)
+class VisualReview:
+    """A recorded human conclusion for one visual-confusable candidate."""
+
+    rule_id: str
+    skeleton_sha256: str
+    conclusion: str  # distinct_verified | merge_required | migration_blocked
+    reviewer: str
+    note: str = ""
+    decided_at: str = ""
+    map_version: str = ""
+    skeleton_version: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "rule_id": self.rule_id,
+            "skeleton_sha256": self.skeleton_sha256,
+            "conclusion": self.conclusion,
+            "reviewer": self.reviewer,
+            "note": self.note,
+            "decided_at": self.decided_at,
+            "map_version": self.map_version,
+            "skeleton_version": self.skeleton_version,
+        }
 
 
 @dataclass(frozen=True)
@@ -152,6 +214,7 @@ class AppConfig:
     config_sha256: str
     severity_overrides: dict[str, str] = field(default_factory=dict)
     max_report_rows: int = 500
+    visual_reviews: tuple[VisualReview, ...] = ()
 
     @property
     def source_map(self) -> dict[str, SourceSpec]:
@@ -160,6 +223,13 @@ class AppConfig:
     @property
     def key_map(self) -> dict[str, KeyRule]:
         return {key.id: key for key in self.keys}
+
+    @property
+    def visual_review_map(self) -> dict[tuple[str, str], VisualReview]:
+        return {
+            (review.rule_id, review.skeleton_sha256): review
+            for review in self.visual_reviews
+        }
 
     def severity_for(self, code: str) -> str:
         if code in self.severity_overrides:
@@ -244,6 +314,9 @@ class KeyResult:
     changed: bool
     defects: list[Defect] = field(default_factory=list)
     collision_group_id: str | None = None
+    # Visual evidence is stored separately from the byte-level key hash.
+    visual_profile: dict[str, Any] | None = None
+    visual_candidate_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -265,6 +338,8 @@ class KeyResult:
                 for d in self.defects
             ],
             "collision_group_id": self.collision_group_id,
+            "visual_profile": self.visual_profile,
+            "visual_candidate_ids": list(self.visual_candidate_ids),
         }
 
 
@@ -304,6 +379,60 @@ class CollisionGroup:
 
 
 @dataclass
+class VisualCandidate:
+    """A cross-key visual-confusable candidate between different binary keys.
+
+    This is *not* a database uniqueness collision. ``review_status`` records
+    whether a human has signed off; until it is ``reviewed`` the migration plan
+    must not claim the keys are directly migratable.
+    """
+
+    candidate_id: str
+    rule_id: str
+    source_id: str
+    skeleton: str
+    skeleton_escaped: str
+    skeleton_sha256: str
+    skeleton_version: str
+    map_version: str
+    policy_mode: str
+    status: str  # "review_required" | "reviewed"
+    risk_level: str  # "high" | "medium" | "unknown"
+    members: list[dict[str, Any]]
+    cross_script: bool
+    unknown_coverage: bool
+    requires_review: bool = True
+    conclusion: str | None = None
+    reviewer: str | None = None
+    review_note: str = ""
+    decided_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidate_id": self.candidate_id,
+            "rule_id": self.rule_id,
+            "source_id": self.source_id,
+            "skeleton": self.skeleton,
+            "skeleton_escaped": self.skeleton_escaped,
+            "skeleton_sha256": self.skeleton_sha256,
+            "skeleton_version": self.skeleton_version,
+            "map_version": self.map_version,
+            "policy_mode": self.policy_mode,
+            "status": self.status,
+            "risk_level": self.risk_level,
+            "cross_script": self.cross_script,
+            "unknown_coverage": self.unknown_coverage,
+            "requires_review": self.requires_review,
+            "conclusion": self.conclusion,
+            "reviewer": self.reviewer,
+            "review_note": self.review_note,
+            "decided_at": self.decided_at,
+            "record_count": len(self.members),
+            "members": list(self.members),
+        }
+
+
+@dataclass
 class ScanResult:
     config: AppConfig
     run_id: str
@@ -316,3 +445,4 @@ class ScanResult:
     summary: dict[str, Any]
     verdict: str
     plan: dict[str, Any]
+    visual_candidates: list[VisualCandidate] = field(default_factory=list)

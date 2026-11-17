@@ -24,6 +24,7 @@ ARTIFACT_FILES = (
     "plan.md",
     "findings.json",
     "collisions.json",
+    "visual_confusables.json",
     "keys.jsonl",
     "ledger.sqlite",
     "manifest.json",
@@ -76,12 +77,53 @@ def write_artifacts(
         },
         "collisions": [group.to_dict() for group in result.collisions],
     }
+    visual_doc = {
+        "schema_version": 1,
+        "kind": "charorder.visual_confusables",
+        "run_id": result.run_id,
+        "map": result.summary["visual_confusable_map"],
+        "counts": {
+            "candidate_groups": result.summary["visual_candidate_groups"],
+            "candidate_records": result.summary["visual_candidate_records"],
+            "pending_reviews": result.summary["visual_pending_reviews"],
+            "unknown_coverage": result.summary["visual_unknown_coverage"],
+            "coverage_unknown_records": result.summary[
+                "visual_coverage_unknown_findings"
+            ],
+        },
+        "certificate": (
+            "none"
+            if result.summary["visual_unknown_coverage"]
+            or result.summary["visual_coverage_unknown_findings"]
+            else "within_map_coverage_only"
+        ),
+        "separate_from_byte_collisions": True,
+        "scope": {
+            "rules_with_script_policy": result.summary["rules_with_script_policy"],
+            "rules_without_script_policy": result.summary["rules_without_script_policy"],
+        },
+        "coverage_unknown_findings": [
+            {
+                "finding_id": finding.finding_id,
+                "rule_id": finding.rule_id,
+                "record_ref": finding.record_ref,
+                "record_id": finding.record_id,
+                "details": finding.details,
+            }
+            for finding in result.findings
+            if finding.code == "VISUAL_COVERAGE_UNKNOWN"
+        ],
+        "candidates": [
+            candidate.to_dict() for candidate in result.visual_candidates
+        ],
+    }
 
     artifacts: dict[str, bytes] = {
         "plan.json": plan_bytes,
         "plan.md": render_plan_markdown(result).encode("utf-8"),
         "findings.json": _json_bytes(findings_doc),
         "collisions.json": _json_bytes(collisions_doc),
+        "visual_confusables.json": _json_bytes(visual_doc),
         "keys.jsonl": _jsonl_bytes(item.to_dict() for item in result.key_results),
         "report.md": render_markdown(result).encode("utf-8"),
         "report.html": render_html(result).encode("utf-8"),

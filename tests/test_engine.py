@@ -76,7 +76,7 @@ class DemoEngineTests(unittest.TestCase):
         )
         self.assertFalse(self.result.plan["gate"]["passes"])
         self.assertEqual(self.result.plan["gate"]["fail_on"], "high")
-        self.assertEqual(len(self.result.plan["steps"]), 7)
+        self.assertEqual(len(self.result.plan["steps"]), 8)
         self.assertIn("forbidden_actions", self.result.plan)
         self.assertNotIn("generated_at", self.result.plan)
 

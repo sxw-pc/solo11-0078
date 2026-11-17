@@ -5,6 +5,7 @@
 字序迁核台读取本地 CSV、JSONL、SQLite 中的文本列，按 JSON 中声明的目标键规则计算迁移后的排序键，并在真正修改数据库之前定位：
 
 - 归一化、大小写折叠、宽度折叠之后的**唯一键碰撞**；
+- **跨键视觉混淆**：字节不同、但经固定版本混淆映射后视觉骨架相同的候选键（例如拉丁 `a` 与西里尔 `а`），以及声明了脚本授权合同后出现的未授权文字体系；
 - 目标索引键的 **UTF-8 字节数 / 字符数超限**；
 - 零宽字符、软连字符、双向文本控制符、控制字符等**不可见字符风险**；
 - NBSP、全角空格、制表符、连续空白、首尾空白等**异常空白**；
@@ -78,8 +79,9 @@ charorder/
 ├── charorder/                 # 标准库实现
 │   ├── config.py              # 严格配置校验与路径解析
 │   ├── ingest.py              # CSV / JSONL / SQLite 只读读取
-│   ├── transforms.py          # 宽度折叠、Unicode 规范化检测与文本分析
-│   ├── engine.py              # 键计算、碰撞检测、风险汇总
+│   ├── transforms.py          # 宽度折叠、Unicode 规范化、文本分析与视觉混淆预检
+│   ├── engine.py              # 键计算、碰撞检测、视觉候选、风险汇总
+│   ├── data/confusables.json  # 版本化、固定、离线的混淆映射快照
 │   ├── planner.py             # 确定性迁移计划与门禁
 │   ├── ledger.py              # SQLite 审计台账
 │   ├── report.py              # Markdown + 自包含 HTML
@@ -88,8 +90,9 @@ charorder/
 │   ├── server.py              # 回环地址只读复核服务器
 │   └── cli.py                 # 命令行入口
 ├── fixtures/demo/             # 合成客户 / 商品 / 联系人数据
+├── fixtures/visual/           # 视觉混淆与脚本授权合成验收数据
 ├── tools/build_demo_fixtures.py
-├── tests/                     # 87 个 unittest 用例
+├── tests/                     # 124 个 unittest 用例
 ├── pyproject.toml
 └── out/                       # demo 运行产物（可重建）
 ```
@@ -225,11 +228,83 @@ charorder/
 - `required`：为 `true` 时，任一分量为 `null` 即产生高等级 `REQUIRED_VALUE_MISSING`，且不参与碰撞检测。
 - `max_bytes` / `max_chars`：对变换后的 UTF-8 字节数 / 字符数设置上限，可为 `null`。
 - `destination`：仅供计划和报告展示的目标表 / 列说明，不会被执行。
+- `script_policy`：可选，声明该目标命名空间的脚本授权合同，见 5.5。
 - 空白字符串（`""` 或变换后为空）会产生 `EMPTY_KEY`，但仍然是一个可碰撞的键值。是否把空串视为非法，由业务在迁移处置中决定。
 
 ### 5.4 复合键分隔符
 
 复合键固定使用 ASCII Unit Separator `U+001F`。若某个变换后的分量本身包含该字符，会生成高等级 `COMPOSITE_SEPARATOR` 风险，避免静默产生歧义键。
+
+### 5.5 脚本授权与视觉混淆
+
+当某个目标命名空间需要声明“允许哪些文字体系”时，在键规则上添加 `script_policy`：
+
+```json
+{
+  "id": "customer_email_ci",
+  "script_policy": {
+    "mode": "strict_script",
+    "allowed_scripts": ["Latin"],
+    "namespace": "crm_v2.customer.email_key",
+    "reason": "该目标列只承载拉丁字母邮箱"
+  }
+}
+```
+
+```json
+{
+  "id": "legacy_email_ci",
+  "script_policy": {
+    "mode": "authorized_mixed",
+    "allowed_scripts": ["Latin", "Cyrillic"],
+    "namespace": "legacy_v2.contact.email_key",
+    "reason": "历史来源允许拉丁与西里尔字母混用"
+  }
+}
+```
+
+两种合同的行为：
+
+| 合同 | 允许脚本 | 出现未授权脚本 | 字节不同但骨架相同的键 |
+|---|---|---|---|
+| `strict_script` | 必须且只能声明一个脚本 | 高等级 `SCRIPT_NOT_AUTHORIZED`，阻断 | 仍进入视觉候选复核 |
+| `authorized_mixed` | 至少两个脚本，且必须 `visual_review_required: true` | 不阻断（脚本已被显式授权） | 保留两个 binary 不同的键，进入人工视觉核验，未核验前不能宣称可直接迁移 |
+
+- `allowed_scripts` 必须是内置映射数据已收录的 Unicode 文字体系名（`Latin`、`Cyrillic`、`Greek`、`Han`、`Hiragana`、`Katakana`、`Common`、`Inherited`）。拼错或未收录会被配置校验拒绝。
+- `Common`（标点、数字）与 `Inherited`（组合附加符）不单独构成脚本授权违约；`Inherited` 组合符叠加在授权脚本上时保留原脚本判定。
+- 只有声明了 `script_policy` 的规则参与视觉预检；未声明的规则不计入候选，也不代表“无视觉风险”。
+- 视觉预检**不修改目标键**。`strict_script` 与 `authorized_mixed` 都不制造虚假的数据库唯一碰撞：字节完全相同的键仍然只产生 `NORMALIZATION_COLLISION` / `DUPLICATE_KEY`。
+
+#### 视觉骨架与映射数据
+
+- 内置映射快照位于 `charorder/data/confusables.json`，固定版本 `map_version`、`skeleton_version` 与 SHA-256 都会写入计划、报告与台账。运行时不访问网络、不读取系统字体或 ICU。
+- 骨架通过**可复核的映射链**生成：每个多码位、组合字符或跨脚本单元都记录 `from` / `to` 码位与脚本，反复映射直到稳定。不是 NFKC，也不是只对 `a/а` 做特判。
+- 映射未收录的码位或脚本组合会标记为 `partial` / `unknown`，并产生 `VISUAL_COVERAGE_UNKNOWN`。此时计划中的 `visual_confusables.certificate` 为 `none`：**不能**给出“无视觉风险”证书。
+
+#### 复核结论
+
+人工复核后，在顶层 `visual_reviews` 写入结论（按“规则 + 骨架 SHA-256”定位）：
+
+```json
+{
+  "visual_reviews": [
+    {
+      "rule_id": "legacy_email_ci",
+      "skeleton_sha256": "<candidate.skeleton_sha256>",
+      "conclusion": "distinct_verified",
+      "reviewer": "审阅人甲",
+      "note": "两条记录属于不同客户，保留两个键",
+      "decided_at": "2026-01-01",
+      "map_version": "uts39-subset-14.0.0-2026.1",
+      "skeleton_version": "co-skeleton-v1"
+    }
+  ]
+}
+```
+
+- `conclusion`：`distinct_verified`（确认是两个不同键）/ `merge_required`（业务需合并）/ `migration_blocked`（不得迁移）。后两者必须填写 `note`。
+- 若复核记录固定了 `map_version` / `skeleton_version` 且与当前内置映射不一致，该结论会被忽略并回到 `review_required`，避免旧版本结论被静默沿用。
+- 未复核的候选会保持 `review_required`，使 `plan.gate.passes` 为 `false`。
 
 ---
 
@@ -245,8 +320,9 @@ charorder/
 | `plan.md` | 迁移计划的人类可读版本 |
 | `findings.json` | 全量风险清单、严重级别和检查码计数 |
 | `collisions.json` | 全量碰撞组及参与者 |
-| `keys.jsonl` | 每条记录 × 每条规则的原始值、目标键、转义值、字节数、哈希、缺陷与碰撞组 ID |
-| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members 及视图） |
+| `keys.jsonl` | 每条记录 × 每条规则的原始值、目标键、转义值、字节数、哈希、缺陷、碰撞组 ID、视觉 profile 与视觉候选 ID |
+| `visual_confusables.json` | 视觉混淆候选组、映射版本 / 骨架版本 / SHA-256、覆盖未知记录、复核状态 |
+| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members / visual_candidates / visual_candidate_members / visual_reviews 及视图） |
 | `manifest.json` | 运行清单：产物哈希、计划哈希、源指纹、复跑命令 |
 
 默认输出目录为 `charorder-runs/<run-id>/`；显式传入 `--out` 可指定位置。目录非空时默认拒绝写入，需用 `--force` 覆盖已知产物名。工具不会清理目录中的未知文件。
@@ -266,7 +342,23 @@ JOIN key_results k ON k.key_result_id = m.key_result_id
 WHERE m.group_id = 'C-...';
 ```
 
-台账中的 `finding_counts` 与 `collision_summary` 是只读视图。
+台账中的 `finding_counts`、`collision_summary` 与 `visual_candidate_summary` 是只读视图。
+
+```sql
+-- 查看视觉候选及其复核状态
+SELECT candidate_id, rule_id, skeleton_escaped, risk_level, cross_script,
+       unknown_coverage, status, conclusion, reviewer
+FROM visual_candidates
+WHERE status = 'review_required';
+
+-- 查看某候选组的成员、码位与映射链
+SELECT m.record_ref, m.target_key_escaped, m.skeleton, m.scripts_json,
+       m.codepoints_json, m.mapping_chain_json
+FROM visual_candidate_members m
+WHERE m.candidate_id = 'V-...';
+```
+
+> 注意：`collisions` 表只包含字节级唯一碰撞；视觉候选在独立的 `visual_candidates` 表，两者不会互相写入。
 
 ---
 
@@ -294,8 +386,11 @@ WHERE m.group_id = 'C-...';
 | `COMPOSITE_SEPARATOR` | high | 变换后的分量含保留分隔符 `U+001F` |
 | `NORMALIZATION_COLLISION` | high | 不同原始值经变换后落入同一唯一键 |
 | `DUPLICATE_KEY` | high | 原始值本身相同，仍形成唯一键重复 |
+| `SCRIPT_NOT_AUTHORIZED` | high | 变换后的目标键使用了 `script_policy` 未授权的文字体系 |
+| `VISUAL_CONFUSABLE_CANDIDATE` | medium | 同一规则下字节不同的目标键共享视觉骨架，需人工核验（不是唯一碰撞） |
+| `VISUAL_COVERAGE_UNKNOWN` | medium | 内置混淆映射无法完整覆盖该键；不得据此宣称无视觉风险 |
 
-可在配置的 `severity_overrides` 中逐项覆盖。
+可在配置的 `severity_overrides` 中逐项覆盖。`SCRIPT_NOT_AUTHORIZED`、`VISUAL_CONFUSABLE_CANDIDATE`、`VISUAL_COVERAGE_UNKNOWN` 与 `NORMALIZATION_COLLISION` / `DUPLICATE_KEY` 属于不同证据族，彼此不改写：字节完全相同的键永远不会被改报为普通视觉提醒。
 
 ---
 
@@ -369,6 +464,13 @@ python tools/build_demo_fixtures.py
 
 演示运行预期结论为 `blocked`，包含高、中、低风险与多个碰撞组，因此在 `--fail-on high` 下退出码为 `1`；这是有意的负面演示。
 
+视觉混淆与脚本授权的合成验收数据位于 `fixtures/visual/`，包含 `strict_script` 与 `authorized_mixed` 两条合同、Latin/Cyrillic `a`、真实的 casefold 后精确碰撞、多码位合字、组合字符，以及映射未覆盖的 Han 记录：
+
+```bash
+python -m charorder run --config fixtures/visual/config.json --out out/charorder-visual --force
+python -m charorder verify --run out/charorder-visual
+```
+
 ---
 
 ## 12. 测试
@@ -377,7 +479,7 @@ python tools/build_demo_fixtures.py
 python -m unittest discover -s tests -v
 ```
 
-87 个标准库 `unittest` 用例覆盖：
+124 个标准库 `unittest` 用例覆盖：
 
 - 宽度折叠、NFC/NFD、casefold、不可见字符策略、空白折叠与管线顺序；
 - 不可见 / 双向 / 控制 / 替换 / 代理 / 乱码 / 空白检测；
@@ -387,7 +489,8 @@ python -m unittest discover -s tests -v
 - 计划确定性、产物哈希、源文件未被修改、SQLite 台账计数与视图；
 - 自包含 HTML、无外部资源、XSS 转义；
 - CLI 退出码、`verify` 篡改检测；
-- 只读服务器 GET/HEAD/405/404 与绑定限制。
+- 只读服务器 GET/HEAD/405/404 与绑定限制；
+- 视觉混淆：映射版本 / SHA-256、Latin 与 Cyrillic `a` 骨架、多码位合字、组合字符、`rn→m`、未知覆盖、脚本授权合同差异、旧版本复核失效、计划 / 产物 / 台账 / 报告一致性。
 
 测试使用临时目录，不会修改演示 fixture。
 
@@ -400,6 +503,8 @@ python -m unittest discover -s tests -v
 - 宽度折叠只处理 East Asian Width `F/H` 片段，不是完整 NFKC；需要更广兼容折叠时显式选择 `NFKC`。
 - 大小写映射基于运行时 Python 的 Unicode 数据，不使用数据库 collation 或系统 locale。运行 ID 包含 Unicode 版本。
 - 碰撞检测按 UTF-8 二进制键精确分组；不提供模糊匹配、编辑距离、拼音或语音近似。
+- 视觉混淆预检基于**有意收窄的固定映射快照**（`uts39-subset-14.0.0-2026.1`，含恒等原型、NFD 链、合字、带-rn-序列与部分 Latin/Cyrillic/Greek 混淆项），不是完整 UTS #39 数据库。快照未覆盖的码位或脚本组合一律标记为未知覆盖，不给“无视觉风险”证书。升级映射版本会改变骨架 SHA-256，需要重新复核。
+- 视觉候选只对声明了 `script_policy` 的键规则生效；未声明的规则不在视觉预检范围内，其“无候选”不代表没有视觉风险。
 - 不自动判断哪个碰撞参与者应保留；不会自动合并、删除、修复乱码或改写源数据。
 - SQLite 台账和报告会包含原始值及部分上下文，仅适合在受控本地环境处理合成或已获授权的数据。
 
@@ -413,8 +518,9 @@ python -m unittest discover -s tests -v
 2. 固化目标键变换与 binary UTF-8 语义；
 3. 清除解码、缺失、超限阻断项；
 4. 逐组人工仲裁唯一键碰撞；
-5. 处理不可见字符与异常空白；
-6. 在独立影子库生成键并做旧新排序对比；
-7. 用 `--fail-on high` 复跑，门禁通过后再切换。
+5. 逐组人工核验跨键视觉混淆候选（未复核前不得宣称可直接迁移）；
+6. 处理不可见字符与异常空白；
+7. 在独立影子库生成键并做旧新排序对比；
+8. 用 `--fail-on high` 复跑，门禁通过后再切换。
 
-工具本身只提供证据，不执行这 7 步中的任何数据库写操作。
+工具本身只提供证据，不执行这 8 步中的任何数据库写操作。

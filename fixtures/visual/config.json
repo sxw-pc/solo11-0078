@@ -1,0 +1,163 @@
+{
+  "version": 1,
+  "project": {
+    "name": "视觉混淆预检 · 合成验收",
+    "target": "visual-check-v1 / utf8mb4 / binary utf8 key",
+    "description": "合成数据：验证视觉混淆风险与字节碰撞分离、脚本授权可追溯、未知映射不伪安全、复核状态在计划与产物一致。"
+  },
+  "sources": [
+    {
+      "id": "strict_latin",
+      "type": "csv",
+      "path": "strict_latin.csv",
+      "encoding": "utf-8",
+      "encoding_errors": "replace",
+      "record_id_field": "id"
+    },
+    {
+      "id": "authorized_mixed",
+      "type": "csv",
+      "path": "authorized_mixed.csv",
+      "encoding": "utf-8",
+      "encoding_errors": "replace",
+      "record_id_field": "id"
+    },
+    {
+      "id": "mapping_gaps",
+      "type": "csv",
+      "path": "mapping_gaps.csv",
+      "encoding": "utf-8",
+      "encoding_errors": "replace",
+      "record_id_field": "id"
+    },
+    {
+      "id": "combining",
+      "type": "csv",
+      "path": "combining.csv",
+      "encoding": "utf-8",
+      "encoding_errors": "replace",
+      "record_id_field": "id"
+    }
+  ],
+  "keys": [
+    {
+      "id": "strict_latin_key",
+      "label": "严格拉丁命名空间 · 邮箱唯一键",
+      "source": "strict_latin",
+      "columns": [
+        "value"
+      ],
+      "destination": "strict_v1.contact.email_key",
+      "description": "只授权 Latin；出现 Cyrillic 即阻断。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "casefold",
+        "width_fold": true,
+        "trim": true,
+        "collapse_whitespace": true,
+        "invisible": "remove"
+      },
+      "unique": true,
+      "required": true,
+      "script_policy": {
+        "mode": "strict_script",
+        "allowed_scripts": [
+          "Latin"
+        ],
+        "namespace": "strict_v1.contact.email_key",
+        "reason": "该目标列声明只承载拉丁字母邮箱"
+      }
+    },
+    {
+      "id": "authorized_mixed_key",
+      "label": "授权双脚本命名空间 · 邮箱唯一键",
+      "source": "authorized_mixed",
+      "columns": [
+        "value"
+      ],
+      "destination": "legacy_v2.contact.email_key",
+      "description": "明确授权 Latin + Cyrillic；字节不同、骨架相近的键保留并进入人工视觉核验。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "casefold",
+        "width_fold": true,
+        "trim": true,
+        "collapse_whitespace": true,
+        "invisible": "remove"
+      },
+      "unique": true,
+      "required": true,
+      "script_policy": {
+        "mode": "authorized_mixed",
+        "allowed_scripts": [
+          "Latin",
+          "Cyrillic"
+        ],
+        "namespace": "legacy_v2.contact.email_key",
+        "reason": "历史来源允许拉丁与西里尔字母混用",
+        "visual_review_required": true
+      }
+    },
+    {
+      "id": "mapping_gap_key",
+      "label": "映射缺口 · 合字与 Han",
+      "source": "mapping_gaps",
+      "columns": [
+        "value"
+      ],
+      "destination": "legacy_v2.gap.name_key",
+      "description": "故意覆盖多码位合字与 Han 脚本，验证未知覆盖不会给出无视觉风险结论。",
+      "transform": {
+        "normalization": "NFC",
+        "case": "none",
+        "width_fold": false,
+        "trim": true,
+        "collapse_whitespace": false,
+        "invisible": "remove"
+      },
+      "unique": true,
+      "required": true,
+      "script_policy": {
+        "mode": "authorized_mixed",
+        "allowed_scripts": [
+          "Latin",
+          "Han"
+        ],
+        "namespace": "legacy_v2.gap.name_key",
+        "reason": "合字与 Han 姓名共存的授权命名空间"
+      }
+    },
+    {
+      "id": "combining_key",
+      "label": "组合字符 · 不规范化唯一键",
+      "source": "combining",
+      "columns": [
+        "value"
+      ],
+      "destination": "legacy_v2.combining.name_key",
+      "description": "不应用 NFC，NFC/NFD 形式字节不同但视觉骨架相同。",
+      "transform": {
+        "normalization": "none",
+        "case": "none",
+        "width_fold": false,
+        "trim": true,
+        "collapse_whitespace": false,
+        "invisible": "remove"
+      },
+      "unique": true,
+      "required": true,
+      "script_policy": {
+        "mode": "strict_script",
+        "allowed_scripts": [
+          "Latin"
+        ],
+        "namespace": "legacy_v2.combining.name_key",
+        "reason": "拉丁姓名字段"
+      }
+    }
+  ],
+  "visual_reviews": [],
+  "reports": {
+    "max_report_rows": 500
+  }
+}

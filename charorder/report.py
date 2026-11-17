@@ -94,6 +94,13 @@ def render_markdown(result: ScanResult) -> str:
         f"- 高 / 中 / 低风险：**{sev.get('high', 0)} / {sev.get('medium', 0)} / {sev.get('low', 0)}**",
         f"- 归一化唯一键碰撞组：**{summary['collision_groups']}**，"
         f"涉及 **{summary['collision_records']}** 条记录",
+        f"- 视觉混淆候选组（二进制不同键）：**{summary['visual_candidate_groups']}**，"
+        f"涉及 **{summary['visual_candidate_records']}** 条记录；"
+        f"待人工复核 **{summary['visual_pending_reviews']}** 组",
+        f"- 映射未覆盖的候选组：**{summary['visual_unknown_coverage']}** · "
+        f"覆盖未知的记录级检查：**{summary['visual_coverage_unknown_findings']}** · "
+        f"混淆映射：`{summary['visual_confusable_map']['map_version']}` / "
+        f"骨架 `{summary['visual_confusable_map']['skeleton_version']}`",
         f"- 超限键：**{summary['overlength_keys']}** · 变换后键值变化：**{summary['changed_keys']}**",
         "",
         "## 源文件指纹",
@@ -113,8 +120,8 @@ def render_markdown(result: ScanResult) -> str:
             "",
             "## 目标键规则",
             "",
-            "| 规则 | 源 / 列 | 目标 | 变换 | 唯一 | 记录 | 碰撞组 | 超限 | 状态 |",
-            "|---|---|---|---|---|---:|---:|---:|---|",
+            "| 规则 | 源 / 列 | 目标 | 变换 | 脚本授权 | 唯一 | 记录 | 碰撞组 | 视觉候选 | 超限 | 状态 |",
+            "|---|---|---|---|---|---|---|---:|---:|---:|---|",
         ]
     )
     plan_rules = {rule["rule_id"]: rule for rule in plan["rules"]}
@@ -122,11 +129,18 @@ def render_markdown(result: ScanResult) -> str:
         stats = next(item for item in summary["rules"] if item["rule_id"] == rule.id)
         plan_rule = plan_rules[rule.id]
         columns = " + ".join(rule.columns)
+        policy_text = (
+            f"{rule.script_policy.mode}: {'/'.join(rule.script_policy.allowed_scripts)}"
+            if rule.script_policy
+            else "未声明"
+        )
         lines.append(
             f"| {_md(rule.id)} | {_md(rule.source_id)} / {_md_code(columns)} | "
             f"{_md_code(rule.destination or '—')} | {_md(rule.transform.describe())} | "
+            f"{_md(policy_text)} | "
             f"{'是' if rule.unique else '否'} | {stats['records']} | "
-            f"{stats['collision_groups']} | {stats['overlength']} | "
+            f"{stats['collision_groups']} | {stats['visual_candidate_groups']} | "
+            f"{stats['overlength']} | "
             f"{_md(_STATUS_LABEL.get(plan_rule['status'], plan_rule['status']))} |"
         )
 
@@ -157,6 +171,78 @@ def render_markdown(result: ScanResult) -> str:
         if len(result.collisions) > 100:
             lines.append(
                 f"> 页面仅展示前 100 组，其余 {len(result.collisions) - 100} 组见 `collisions.json` 与台账。"
+            )
+
+    lines.extend(["", "## 视觉混淆候选（与字节碰撞分开）", ""])
+    lines.append(
+        f"以下候选的**目标键二进制不同**，不构成数据库唯一碰撞；"
+        f"它们共享视觉骨架，需要人工核验。骨架版本 "
+        f"`{summary['visual_confusable_map']['skeleton_version']}`，"
+        f"映射 `{summary['visual_confusable_map']['map_version']}` "
+        f"(SHA-256 `{summary['visual_confusable_map']['map_sha256'][:20]}…`)，"
+        f"映射覆盖之外的字符一律标为未知。"
+    )
+    lines.append("")
+    if not result.visual_candidates:
+        lines.append(
+            "未发现在内置映射覆盖范围内共享视觉骨架的不同二进制键。"
+            "该结论不构成“无视觉风险”证书：映射未覆盖的字符仍按未知处理。"
+        )
+    else:
+        for candidate in result.visual_candidates[:100]:
+            lines.append(
+                f"### `{candidate.candidate_id}` · `{candidate.rule_id}`"
+            )
+            lines.append("")
+            conclusion = (
+                f"已复核：`{candidate.conclusion}`（{candidate.reviewer}）"
+                if candidate.status == "reviewed"
+                else "**待人工复核**"
+            )
+            lines.append(
+                f"- 视觉骨架：{_md_code(candidate.skeleton_escaped)} · "
+                f"源/规则：`{candidate.source_id}` / `{candidate.rule_id}` · "
+                f"风险：`{candidate.risk_level}` · 跨体系："
+                f"{'是' if candidate.cross_script else '否'} · "
+                f"映射覆盖：{'未知' if candidate.unknown_coverage else '已覆盖'}"
+            )
+            lines.append(
+                f"- 脚本合同：`{candidate.policy_mode}` · 状态：{conclusion} · "
+                f"记录数：{len(candidate.members)} · "
+                f"骨架版本 `{candidate.skeleton_version}` · "
+                f"骨架 SHA-256：`{candidate.skeleton_sha256[:20]}…`"
+            )
+            lines.append("")
+            lines.append("| 记录引用 | 记录标识 | 原文（转义） | 原 target_key | 码位 | 脚本 | 骨架 |")
+            lines.append("|---|---|---|---|---|---|---|")
+            for member in candidate.members:
+                codepoints = " ".join(
+                    item["codepoint"] for item in member["codepoints"]
+                )
+                duplicate_note = (
+                    f"<br>同键重复：{_md(', '.join(member.get('exact_duplicate_record_refs', [])))}"
+                    if member.get("exact_duplicate_record_refs")
+                    else ""
+                )
+                lines.append(
+                    f"| {_md(member['record_ref'])} | {_md(member['record_id'] or '∅')} | "
+                    f"{_md_code(member['raw_display'])} | "
+                    f"{_md_code(member['target_key_escaped'])} | {_md_code(codepoints)} | "
+                    f"{_md(', '.join(member['scripts']) or '∅')} | "
+                    f"{_md_code(member['skeleton_escaped'] or '')} |{duplicate_note}"
+                )
+            lines.append("")
+            if candidate.unknown_coverage:
+                lines.append(
+                    "> 该组含映射未覆盖的码位或脚本组合：不能给出“无视觉风险”结论，"
+                    "只能记录为未知覆盖。"
+                )
+                lines.append("")
+        if len(result.visual_candidates) > 100:
+            lines.append(
+                f"> 页面仅展示前 100 组，其余 "
+                f"{len(result.visual_candidates) - 100} 组见 "
+                f"`visual_confusables.json` 与台账。"
             )
 
     lines.extend(["", "## 风险清单", ""])
@@ -237,7 +323,17 @@ def render_plan_markdown(result: ScanResult) -> str:
         f"- 门禁等级：`{plan['gate']['fail_on']}`",
         f"- 当前阻断发现：**{plan['gate']['blocking_findings']}**",
         f"- 当前碰撞组：**{plan['gate']['collision_groups']}**",
+        f"- 视觉候选待复核：**{plan['gate']['visual_pending_reviews']}** · "
+        f"映射未知组：**{plan['gate']['visual_unknown_coverage']}** · "
+        f"记录级覆盖未知：**{plan['gate'].get('visual_coverage_unknown_records', 0)}**",
         f"- 自动门禁结果：**{'通过' if plan['gate']['passes'] else '未通过'}**",
+        "",
+        "视觉混淆预检使用固定版本映射 "
+        f"`{plan['visual_confusables']['map_version']}` / 骨架 "
+        f"`{plan['visual_confusables']['skeleton_version']}`；"
+        "结论仅在该映射覆盖范围内成立，未覆盖字符保留为未知。"
+        "视觉候选与 `NORMALIZATION_COLLISION` / `DUPLICATE_KEY` 是不同证据，"
+        "互不改写。",
         "",
         "复跑命令模板：",
         "",
@@ -262,18 +358,26 @@ def render_plan_markdown(result: ScanResult) -> str:
             "",
             "## 规则就绪度",
             "",
-            "| 规则 | 源 / 列 | 目标 | 状态 | 记录 | 键变化 | 碰撞组 | 超限 | 阻断检查 |",
-            "|---|---|---|---|---:|---:|---:|---:|---|",
+            "| 规则 | 源 / 列 | 目标 | 脚本授权 | 状态 | 记录 | 键变化 | 碰撞组 | 视觉候选 | 超限 | 阻断检查 |",
+            "|---|---|---|---|---|---:|---:|---:|---:|---:|---|",
         ]
     )
     for rule in plan["rules"]:
+        policy = rule.get("script_policy")
+        policy_text = (
+            f"{policy['mode']}: {'/'.join(policy['allowed_scripts'])}"
+            if policy
+            else "未声明"
+        )
         lines.append(
             f"| {_md(rule['rule_id'])} | {_md(rule['source_id'])} / "
             f"{_md_code(' + '.join(rule['columns']))} | "
             f"{_md_code(rule['destination'] or '—')} | "
+            f"{_md(policy_text)} | "
             f"{_md(_STATUS_LABEL.get(rule['status'], rule['status']))} | "
             f"{rule['records']} | {rule['changed_keys']} | "
-            f"{rule['collision_groups']} | {rule['overlength']} | "
+            f"{rule['collision_groups']} | {rule.get('visual_candidate_groups', 0)} | "
+            f"{rule['overlength']} | "
             f"{_md(', '.join(rule['blocking_codes']) or '—')} |"
         )
     lines.extend(["", "## 执行步骤", ""])
@@ -308,6 +412,35 @@ def render_plan_markdown(result: ScanResult) -> str:
                     f"{_md(', '.join(str(item) for item in example['record_ids'] if item is not None) or '—')} |"
                 )
             lines.append("")
+    visual = plan.get("visual_confusables") or {}
+    visual_examples = visual.get("candidates") or []
+    lines.extend(["", "## 视觉混淆候选（二进制不同键）", ""])
+    lines.append(
+        "这些候选不是数据库唯一碰撞，目标键保持不变；"
+        "未复核前不得宣称可直接迁移。映射未覆盖项不得给出“无视觉风险”证书。"
+    )
+    if not visual_examples:
+        lines.append("")
+        lines.append("本次未发现共享视觉骨架的不同二进制键（仅在映射覆盖范围内）。")
+    else:
+        lines.extend(
+            [
+                "",
+                "| 候选 | 规则 | 骨架 | 风险 | 跨体系 | 映射覆盖 | 状态 | 成员键 |",
+                "|---|---|---|---|---|---|---|---|",
+            ]
+        )
+        for example in visual_examples:
+            keys = ", ".join(example["member_keys_escaped"])
+            lines.append(
+                f"| {_md(example['candidate_id'])} | {_md(example['rule_id'])} | "
+                f"{_md_code(example['skeleton_escaped'])} | {_md(example['risk_level'])} | "
+                f"{'是' if example['cross_script'] else '否'} | "
+                f"{'未知' if example['unknown_coverage'] else '已覆盖'} | "
+                f"{_md(example['status'] + ('/' + example['conclusion'] if example.get('conclusion') else ''))} | "
+                f"{_md_code(keys)} |"
+            )
+        lines.append("")
     lines.extend(
         [
             "## 禁止动作",
@@ -425,6 +558,71 @@ def render_html(result: ScanResult) -> str:
             f'<p class="note">页面仅展示前 {collision_cap} 组；'
             f"其余 {len(result.collisions) - collision_cap} 组见 "
             f"<code>collisions.json</code> 与 SQLite 台账。</p>"
+        )
+
+    visual_cards = []
+    for candidate in result.visual_candidates[:100]:
+        member_rows = "\n".join(
+            f"""
+              <tr>
+                <td class="mono">{_e(member['record_ref'])}</td>
+                <td class="mono">{_e(member['record_id'] or '∅')}</td>
+                <td class="mono value-cell">{_e(member['raw_display'])}</td>
+                <td class="mono value-cell">{_e(member['target_key_escaped'])}</td>
+                <td class="mono small">{_e(' '.join(item['codepoint'] for item in member['codepoints']))}</td>
+                <td class="small">{_e(', '.join(member['scripts']) or '∅')}</td>
+                <td class="mono value-cell">{_e(member['skeleton_escaped'] or '')}</td>
+              </tr>"""
+            for member in candidate.members[:50]
+        )
+        more = ""
+        if len(candidate.members) > 50:
+            more = (
+                f'<p class="note">该候选仅展示前 50 条；完整成员见 '
+                f"<code>visual_confusables.json</code>。</p>"
+            )
+        status_text = (
+            f"已复核 · {candidate.conclusion}"
+            if candidate.status == "reviewed"
+            else "待人工复核"
+        )
+        visual_cards.append(
+            f"""
+        <article class="collision-card visual-card">
+          <header>
+            <div>
+              <div class="eyebrow small">VISUAL CONFUSABLE · {_e(candidate.policy_mode)}</div>
+              <h3><span class="mono">{_e(candidate.candidate_id)}</span> <span class="muted">·</span> {_e(candidate.rule_id)}</h3>
+            </div>
+            <span class="count-chip">{len(candidate.members)} 条</span>
+          </header>
+          <div class="collision-key">
+            <span class="tiny-label">视觉骨架（不是数据库碰撞）</span>
+            <code>{_e(candidate.skeleton_escaped)}</code>
+          </div>
+          <div class="muted small">
+            风险 {_e(candidate.risk_level)} · 跨体系 {_e('是' if candidate.cross_script else '否')} ·
+            映射 {_e('未知' if candidate.unknown_coverage else '已覆盖')} ·
+            骨架版本 {_e(candidate.skeleton_version)} ·
+            骨架 SHA-256 {_e(candidate.skeleton_sha256[:20])}…
+          </div>
+          <div class="muted small"><strong>{_e(status_text)}</strong>
+            {(' · 复核人 ' + _e(candidate.reviewer or '')) if candidate.reviewer else ''}
+            {(' · ' + _e(candidate.review_note)) if candidate.review_note else ''}
+          </div>
+          <div class="table-scroll compact">
+            <table>
+              <thead><tr><th>记录引用</th><th>记录标识</th><th>原文</th><th>原 target_key（未修改）</th><th>码位</th><th>脚本</th><th>骨架</th></tr></thead>
+              <tbody>{member_rows}</tbody>
+            </table>
+          </div>
+          {more}
+        </article>"""
+        )
+    if not visual_cards:
+        visual_cards.append(
+            '<div class="empty-state"><strong>映射覆盖范围内未发现跨键视觉候选</strong>'
+            "<span>这不是“无视觉风险”证书：映射未覆盖的字符或脚本仍按未知处理。</span></div>"
         )
 
     severity_options = "\n".join(
@@ -666,7 +864,7 @@ main {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 72p
 .sev-high.severity-tile {{ background: var(--red-soft); }} .sev-high.severity-tile strong {{ color: var(--red); }}
 .sev-medium.severity-tile {{ background: var(--amber-soft); }} .sev-medium.severity-tile strong {{ color: var(--amber); }}
 .sev-low.severity-tile {{ background: var(--teal-soft); }} .sev-low.severity-tile strong {{ color: var(--teal); }}
-.metrics {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }}
+.metrics {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }}
 .metric {{ background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }}
 .metric span {{ display: block; color: var(--ink-soft); font-size: 12px; }}
 .metric strong {{ display: block; font-family: var(--mono); font-size: 29px; letter-spacing: -.04em; margin-top: 4px; }}
@@ -809,6 +1007,7 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
     <div class="metric"><span>目标键</span><strong>{summary['keys_evaluated']:,}</strong><small>{summary['key_rule_count']} 条规则</small></div>
     <div class="metric"><span>键值变化</span><strong>{summary['changed_keys']:,}</strong><small>归一化 / 折叠后</small></div>
     <div class="metric"><span>碰撞组</span><strong>{summary['collision_groups']:,}</strong><small>{summary['collision_records']} 条记录</small></div>
+    <div class="metric"><span>视觉候选</span><strong>{summary['visual_candidate_groups']:,}</strong><small>待复核 {summary['visual_pending_reviews']} · 未知映射 {summary['visual_unknown_coverage']}</small></div>
   </section>
 
   <section class="section" id="sources">
@@ -837,6 +1036,15 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
     <div class="section-head"><h2>唯一键碰撞组</h2><p>业务必须逐组裁决，工具不自动合并</p></div>
     {''.join(collision_cards)}
     {collision_more}
+  </section>
+
+  <section class="section" id="visual">
+    <div class="section-head"><h2>视觉混淆候选</h2><p>二进制不同的键 · 需人工核验 · 不是唯一碰撞</p></div>
+    <p class="note">映射 <code>{_e(summary['visual_confusable_map']['map_version'])}</code> ·
+      骨架 <code>{_e(summary['visual_confusable_map']['skeleton_version'])}</code> ·
+      固定 SHA-256 <code>{_e(summary['visual_confusable_map']['map_sha256'][:20])}…</code> ·
+      完全离线，不访问网络。未覆盖的字符或脚本组合标记为未知，不签发“无视觉风险”证书。</p>
+    {''.join(visual_cards)}
   </section>
 
   <section class="section" id="findings">
@@ -894,6 +1102,7 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
           <a href="plan.md"><span>计划摘要</span><span>MD</span></a>
           <a href="findings.json"><span>风险清单</span><span>JSON</span></a>
           <a href="collisions.json"><span>碰撞组</span><span>JSON</span></a>
+          <a href="visual_confusables.json"><span>视觉混淆候选</span><span>JSON</span></a>
           <a href="keys.jsonl"><span>逐键结果</span><span>JSONL</span></a>
           <a href="ledger.sqlite"><span>审计台账</span><span>SQLite</span></a>
           <a href="manifest.json"><span>运行清单</span><span>JSON</span></a>

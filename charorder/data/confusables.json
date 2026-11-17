@@ -1,0 +1,3402 @@
+{
+  "schema_version": 1,
+  "kind": "charorder.confusable_map",
+  "map_version": "uts39-subset-14.0.0-2026.1",
+  "unicode_version": "14.0.0",
+  "skeleton_version": "co-skeleton-v1",
+  "provenance": {
+    "source": "Unicode UTS #39 Confusables.txt plus curated identity/NFD-chain entries",
+    "license": "Unicode License v3",
+    "offline_only": true,
+    "network_access": false,
+    "note": "This is a deliberately small, fixed, offline snapshot. It is not the complete Unicode confusables database; characters or scripts outside these tables are reported as unknown coverage and must not receive a 'no visual risk' certificate."
+  },
+  "scripts": [
+    {
+      "name": "Latin",
+      "ranges": [
+        [
+          "0041",
+          "005A"
+        ],
+        [
+          "0061",
+          "007A"
+        ],
+        [
+          "00AA",
+          "00AA"
+        ],
+        [
+          "00BA",
+          "00BA"
+        ],
+        [
+          "00C0",
+          "00D6"
+        ],
+        [
+          "00D8",
+          "00F6"
+        ],
+        [
+          "00F8",
+          "02AF"
+        ],
+        [
+          "1D00",
+          "1D7F"
+        ],
+        [
+          "1E00",
+          "1EFF"
+        ],
+        [
+          "2071",
+          "2071"
+        ],
+        [
+          "207F",
+          "207F"
+        ],
+        [
+          "2090",
+          "209C"
+        ],
+        [
+          "212A",
+          "212B"
+        ],
+        [
+          "2132",
+          "2132"
+        ],
+        [
+          "214E",
+          "214E"
+        ],
+        [
+          "2160",
+          "2188"
+        ],
+        [
+          "2C60",
+          "2C7F"
+        ],
+        [
+          "A722",
+          "A787"
+        ],
+        [
+          "A78B",
+          "A7CA"
+        ],
+        [
+          "AB30",
+          "AB6F"
+        ],
+        [
+          "FB00",
+          "FB06"
+        ],
+        [
+          "FF21",
+          "FF3A"
+        ],
+        [
+          "FF41",
+          "FF5A"
+        ]
+      ]
+    },
+    {
+      "name": "Cyrillic",
+      "ranges": [
+        [
+          "0400",
+          "0484"
+        ],
+        [
+          "048A",
+          "052F"
+        ],
+        [
+          "1C80",
+          "1C88"
+        ],
+        [
+          "1D2B",
+          "1D2B"
+        ],
+        [
+          "1D78",
+          "1D78"
+        ],
+        [
+          "2DE0",
+          "2DFF"
+        ],
+        [
+          "A640",
+          "A69F"
+        ],
+        [
+          "FE2E",
+          "FE2F"
+        ]
+      ]
+    },
+    {
+      "name": "Greek",
+      "ranges": [
+        [
+          "0370",
+          "0373"
+        ],
+        [
+          "0375",
+          "0377"
+        ],
+        [
+          "037A",
+          "037D"
+        ],
+        [
+          "037F",
+          "037F"
+        ],
+        [
+          "0384",
+          "0384"
+        ],
+        [
+          "0386",
+          "0386"
+        ],
+        [
+          "0388",
+          "03E1"
+        ],
+        [
+          "03F0",
+          "03FF"
+        ],
+        [
+          "1D26",
+          "1D2A"
+        ],
+        [
+          "1D5D",
+          "1D61"
+        ],
+        [
+          "1D66",
+          "1D6A"
+        ],
+        [
+          "1F00",
+          "1FFF"
+        ],
+        [
+          "2126",
+          "2126"
+        ],
+        [
+          "AB65",
+          "AB65"
+        ]
+      ]
+    },
+    {
+      "name": "Han",
+      "ranges": [
+        [
+          "2E80",
+          "2EFF"
+        ],
+        [
+          "3400",
+          "4DBF"
+        ],
+        [
+          "4E00",
+          "9FFF"
+        ],
+        [
+          "F900",
+          "FAFF"
+        ],
+        [
+          "20000",
+          "2FA1F"
+        ]
+      ]
+    },
+    {
+      "name": "Hiragana",
+      "ranges": [
+        [
+          "3041",
+          "3096"
+        ],
+        [
+          "309D",
+          "309F"
+        ],
+        [
+          "1B001",
+          "1B11F"
+        ]
+      ]
+    },
+    {
+      "name": "Katakana",
+      "ranges": [
+        [
+          "30A1",
+          "30FA"
+        ],
+        [
+          "30FD",
+          "30FF"
+        ],
+        [
+          "31F0",
+          "31FF"
+        ],
+        [
+          "FF66",
+          "FF6F"
+        ],
+        [
+          "FF71",
+          "FF9D"
+        ],
+        [
+          "1B000",
+          "1B000"
+        ]
+      ]
+    },
+    {
+      "name": "Common",
+      "ranges": [
+        [
+          "0000",
+          "0040"
+        ],
+        [
+          "005B",
+          "0060"
+        ],
+        [
+          "007B",
+          "00B9"
+        ],
+        [
+          "00BB",
+          "00BF"
+        ],
+        [
+          "00D7",
+          "00D7"
+        ],
+        [
+          "00F7",
+          "00F7"
+        ],
+        [
+          "02B0",
+          "02FF"
+        ],
+        [
+          "037E",
+          "037E"
+        ],
+        [
+          "0387",
+          "0387"
+        ],
+        [
+          "1DC0",
+          "1DFF"
+        ],
+        [
+          "2000",
+          "206F"
+        ],
+        [
+          "20A0",
+          "20CF"
+        ],
+        [
+          "2100",
+          "214F"
+        ],
+        [
+          "2190",
+          "23FF"
+        ],
+        [
+          "2460",
+          "24FF"
+        ],
+        [
+          "2500",
+          "27BF"
+        ],
+        [
+          "2900",
+          "2BFF"
+        ],
+        [
+          "3000",
+          "303F"
+        ],
+        [
+          "FE00",
+          "FE0F"
+        ],
+        [
+          "FE20",
+          "FE2F"
+        ],
+        [
+          "FE30",
+          "FE4F"
+        ],
+        [
+          "FE50",
+          "FE6F"
+        ],
+        [
+          "FEFF",
+          "FEFF"
+        ],
+        [
+          "FFF9",
+          "FFFD"
+        ]
+      ]
+    },
+    {
+      "name": "Inherited",
+      "ranges": [
+        [
+          "0300",
+          "036F"
+        ]
+      ]
+    }
+  ],
+  "entries": [
+    {
+      "match": [
+        "0000"
+      ],
+      "skeleton": [
+        "0000"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0001"
+      ],
+      "skeleton": [
+        "0001"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0002"
+      ],
+      "skeleton": [
+        "0002"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0003"
+      ],
+      "skeleton": [
+        "0003"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0004"
+      ],
+      "skeleton": [
+        "0004"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0005"
+      ],
+      "skeleton": [
+        "0005"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0006"
+      ],
+      "skeleton": [
+        "0006"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0007"
+      ],
+      "skeleton": [
+        "0007"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0008"
+      ],
+      "skeleton": [
+        "0008"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0009"
+      ],
+      "skeleton": [
+        "0009"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "000A"
+      ],
+      "skeleton": [
+        "000A"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "000B"
+      ],
+      "skeleton": [
+        "000B"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "000C"
+      ],
+      "skeleton": [
+        "000C"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "000D"
+      ],
+      "skeleton": [
+        "000D"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "000E"
+      ],
+      "skeleton": [
+        "000E"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "000F"
+      ],
+      "skeleton": [
+        "000F"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0010"
+      ],
+      "skeleton": [
+        "0010"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0011"
+      ],
+      "skeleton": [
+        "0011"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0012"
+      ],
+      "skeleton": [
+        "0012"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0013"
+      ],
+      "skeleton": [
+        "0013"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0014"
+      ],
+      "skeleton": [
+        "0014"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0015"
+      ],
+      "skeleton": [
+        "0015"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0016"
+      ],
+      "skeleton": [
+        "0016"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0017"
+      ],
+      "skeleton": [
+        "0017"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0018"
+      ],
+      "skeleton": [
+        "0018"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0019"
+      ],
+      "skeleton": [
+        "0019"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "001A"
+      ],
+      "skeleton": [
+        "001A"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "001B"
+      ],
+      "skeleton": [
+        "001B"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "001C"
+      ],
+      "skeleton": [
+        "001C"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "001D"
+      ],
+      "skeleton": [
+        "001D"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "001E"
+      ],
+      "skeleton": [
+        "001E"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "001F"
+      ],
+      "skeleton": [
+        "001F"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0020"
+      ],
+      "skeleton": [
+        "0020"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0021"
+      ],
+      "skeleton": [
+        "0021"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0022"
+      ],
+      "skeleton": [
+        "0022"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0023"
+      ],
+      "skeleton": [
+        "0023"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0024"
+      ],
+      "skeleton": [
+        "0024"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0025"
+      ],
+      "skeleton": [
+        "0025"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0026"
+      ],
+      "skeleton": [
+        "0026"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0027"
+      ],
+      "skeleton": [
+        "0027"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0028"
+      ],
+      "skeleton": [
+        "0028"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0029"
+      ],
+      "skeleton": [
+        "0029"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "002A"
+      ],
+      "skeleton": [
+        "002A"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "002B"
+      ],
+      "skeleton": [
+        "002B"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "002C"
+      ],
+      "skeleton": [
+        "002C"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "002D"
+      ],
+      "skeleton": [
+        "002D"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "002E"
+      ],
+      "skeleton": [
+        "002E"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "002F"
+      ],
+      "skeleton": [
+        "002F"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0030"
+      ],
+      "skeleton": [
+        "0030"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0031"
+      ],
+      "skeleton": [
+        "0031"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0032"
+      ],
+      "skeleton": [
+        "0032"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0033"
+      ],
+      "skeleton": [
+        "0033"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0034"
+      ],
+      "skeleton": [
+        "0034"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0035"
+      ],
+      "skeleton": [
+        "0035"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0036"
+      ],
+      "skeleton": [
+        "0036"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0037"
+      ],
+      "skeleton": [
+        "0037"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0038"
+      ],
+      "skeleton": [
+        "0038"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0039"
+      ],
+      "skeleton": [
+        "0039"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "003A"
+      ],
+      "skeleton": [
+        "003A"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "003B"
+      ],
+      "skeleton": [
+        "003B"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "003C"
+      ],
+      "skeleton": [
+        "003C"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "003D"
+      ],
+      "skeleton": [
+        "003D"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "003E"
+      ],
+      "skeleton": [
+        "003E"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "003F"
+      ],
+      "skeleton": [
+        "003F"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0040"
+      ],
+      "skeleton": [
+        "0040"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0041"
+      ],
+      "skeleton": [
+        "0041"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0042"
+      ],
+      "skeleton": [
+        "0042"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0043"
+      ],
+      "skeleton": [
+        "0043"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0044"
+      ],
+      "skeleton": [
+        "0044"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0045"
+      ],
+      "skeleton": [
+        "0045"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0046"
+      ],
+      "skeleton": [
+        "0046"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0047"
+      ],
+      "skeleton": [
+        "0047"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0048"
+      ],
+      "skeleton": [
+        "0048"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0049"
+      ],
+      "skeleton": [
+        "0049"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "004A"
+      ],
+      "skeleton": [
+        "004A"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "004B"
+      ],
+      "skeleton": [
+        "004B"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "004C"
+      ],
+      "skeleton": [
+        "004C"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "004D"
+      ],
+      "skeleton": [
+        "004D"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "004E"
+      ],
+      "skeleton": [
+        "004E"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "004F"
+      ],
+      "skeleton": [
+        "004F"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0050"
+      ],
+      "skeleton": [
+        "0050"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0051"
+      ],
+      "skeleton": [
+        "0051"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0052"
+      ],
+      "skeleton": [
+        "0052"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0053"
+      ],
+      "skeleton": [
+        "0053"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0054"
+      ],
+      "skeleton": [
+        "0054"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0055"
+      ],
+      "skeleton": [
+        "0055"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0056"
+      ],
+      "skeleton": [
+        "0056"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0057"
+      ],
+      "skeleton": [
+        "0057"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0058"
+      ],
+      "skeleton": [
+        "0058"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0059"
+      ],
+      "skeleton": [
+        "0059"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "005A"
+      ],
+      "skeleton": [
+        "005A"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "005B"
+      ],
+      "skeleton": [
+        "005B"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "005C"
+      ],
+      "skeleton": [
+        "005C"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "005D"
+      ],
+      "skeleton": [
+        "005D"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "005E"
+      ],
+      "skeleton": [
+        "005E"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "005F"
+      ],
+      "skeleton": [
+        "005F"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0060"
+      ],
+      "skeleton": [
+        "0060"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0061"
+      ],
+      "skeleton": [
+        "0061"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0062"
+      ],
+      "skeleton": [
+        "0062"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0063"
+      ],
+      "skeleton": [
+        "0063"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0064"
+      ],
+      "skeleton": [
+        "0064"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0065"
+      ],
+      "skeleton": [
+        "0065"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0066"
+      ],
+      "skeleton": [
+        "0066"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0067"
+      ],
+      "skeleton": [
+        "0067"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0068"
+      ],
+      "skeleton": [
+        "0068"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0069"
+      ],
+      "skeleton": [
+        "0069"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "006A"
+      ],
+      "skeleton": [
+        "006A"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "006B"
+      ],
+      "skeleton": [
+        "006B"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "006C"
+      ],
+      "skeleton": [
+        "006C"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "006D"
+      ],
+      "skeleton": [
+        "006D"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "006E"
+      ],
+      "skeleton": [
+        "006E"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "006F"
+      ],
+      "skeleton": [
+        "006F"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0070"
+      ],
+      "skeleton": [
+        "0070"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0071"
+      ],
+      "skeleton": [
+        "0071"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0072"
+      ],
+      "skeleton": [
+        "0072"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0073"
+      ],
+      "skeleton": [
+        "0073"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0074"
+      ],
+      "skeleton": [
+        "0074"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0075"
+      ],
+      "skeleton": [
+        "0075"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0076"
+      ],
+      "skeleton": [
+        "0076"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0077"
+      ],
+      "skeleton": [
+        "0077"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0078"
+      ],
+      "skeleton": [
+        "0078"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0079"
+      ],
+      "skeleton": [
+        "0079"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "007A"
+      ],
+      "skeleton": [
+        "007A"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "007B"
+      ],
+      "skeleton": [
+        "007B"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "007C"
+      ],
+      "skeleton": [
+        "007C"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "007D"
+      ],
+      "skeleton": [
+        "007D"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "007E"
+      ],
+      "skeleton": [
+        "007E"
+      ],
+      "scripts": [
+        "Common"
+      ],
+      "note": "identity prototype",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0300"
+      ],
+      "skeleton": [
+        "0300"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0301"
+      ],
+      "skeleton": [
+        "0301"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0302"
+      ],
+      "skeleton": [
+        "0302"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0303"
+      ],
+      "skeleton": [
+        "0303"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0304"
+      ],
+      "skeleton": [
+        "0304"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0306"
+      ],
+      "skeleton": [
+        "0306"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0307"
+      ],
+      "skeleton": [
+        "0307"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0308"
+      ],
+      "skeleton": [
+        "0308"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "030A"
+      ],
+      "skeleton": [
+        "030A"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "030C"
+      ],
+      "skeleton": [
+        "030C"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0327"
+      ],
+      "skeleton": [
+        "0327"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0328"
+      ],
+      "skeleton": [
+        "0328"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "0331"
+      ],
+      "skeleton": [
+        "0331"
+      ],
+      "scripts": [
+        "Inherited"
+      ],
+      "note": "combining mark identity",
+      "source": "identity table"
+    },
+    {
+      "match": [
+        "00E0"
+      ],
+      "skeleton": [
+        "0061",
+        "0300"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00E1"
+      ],
+      "skeleton": [
+        "0061",
+        "0301"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00E2"
+      ],
+      "skeleton": [
+        "0061",
+        "0302"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00E4"
+      ],
+      "skeleton": [
+        "0061",
+        "0308"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00E7"
+      ],
+      "skeleton": [
+        "0063",
+        "0327"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00E8"
+      ],
+      "skeleton": [
+        "0065",
+        "0300"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00E9"
+      ],
+      "skeleton": [
+        "0065",
+        "0301"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00EA"
+      ],
+      "skeleton": [
+        "0065",
+        "0302"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00ED"
+      ],
+      "skeleton": [
+        "0069",
+        "0301"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00F1"
+      ],
+      "skeleton": [
+        "006E",
+        "0303"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00F3"
+      ],
+      "skeleton": [
+        "006F",
+        "0301"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00F4"
+      ],
+      "skeleton": [
+        "006F",
+        "0302"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00F6"
+      ],
+      "skeleton": [
+        "006F",
+        "0308"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00FA"
+      ],
+      "skeleton": [
+        "0075",
+        "0301"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00FC"
+      ],
+      "skeleton": [
+        "0075",
+        "0308"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00FD"
+      ],
+      "skeleton": [
+        "0079",
+        "0301"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00C0"
+      ],
+      "skeleton": [
+        "0061",
+        "0300"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00C1"
+      ],
+      "skeleton": [
+        "0061",
+        "0301"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00C2"
+      ],
+      "skeleton": [
+        "0061",
+        "0302"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00C4"
+      ],
+      "skeleton": [
+        "0061",
+        "0308"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00C7"
+      ],
+      "skeleton": [
+        "0063",
+        "0327"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00C8"
+      ],
+      "skeleton": [
+        "0065",
+        "0300"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00C9"
+      ],
+      "skeleton": [
+        "0065",
+        "0301"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00CA"
+      ],
+      "skeleton": [
+        "0065",
+        "0302"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00CD"
+      ],
+      "skeleton": [
+        "0069",
+        "0301"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00D1"
+      ],
+      "skeleton": [
+        "006E",
+        "0303"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00D3"
+      ],
+      "skeleton": [
+        "006F",
+        "0301"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00D4"
+      ],
+      "skeleton": [
+        "006F",
+        "0302"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00D6"
+      ],
+      "skeleton": [
+        "006F",
+        "0308"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00DA"
+      ],
+      "skeleton": [
+        "0075",
+        "0301"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00DC"
+      ],
+      "skeleton": [
+        "0075",
+        "0308"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "00DD"
+      ],
+      "skeleton": [
+        "0079",
+        "0301"
+      ],
+      "scripts": [
+        "Latin",
+        "Inherited"
+      ],
+      "note": "uppercase precomposed Latin letter",
+      "source": "NFD chain table"
+    },
+    {
+      "match": [
+        "FB01"
+      ],
+      "skeleton": [
+        "0066",
+        "0069"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "LATIN SMALL LIGATURE FI",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "FB02"
+      ],
+      "skeleton": [
+        "0066",
+        "006C"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "LATIN SMALL LIGATURE FL",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "FB03"
+      ],
+      "skeleton": [
+        "0066",
+        "0066",
+        "0069"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "LATIN SMALL LIGATURE FFI",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "FB04"
+      ],
+      "skeleton": [
+        "0066",
+        "0066",
+        "006C"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "LATIN SMALL LIGATURE FFL",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "00DF"
+      ],
+      "skeleton": [
+        "0073",
+        "0073"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "LATIN SMALL LETTER SHARP S",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "1E9E"
+      ],
+      "skeleton": [
+        "0073",
+        "0073"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "LATIN CAPITAL LETTER SHARP S",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0072",
+        "006E"
+      ],
+      "skeleton": [
+        "006D"
+      ],
+      "scripts": [
+        "Latin"
+      ],
+      "note": "sequence rn renders like m",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0430"
+      ],
+      "skeleton": [
+        "0061"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0435"
+      ],
+      "skeleton": [
+        "0065"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "043A"
+      ],
+      "skeleton": [
+        "006B"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "043C"
+      ],
+      "skeleton": [
+        "006D"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "043E"
+      ],
+      "skeleton": [
+        "006F"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0440"
+      ],
+      "skeleton": [
+        "0070"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0441"
+      ],
+      "skeleton": [
+        "0063"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0443"
+      ],
+      "skeleton": [
+        "0075"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0445"
+      ],
+      "skeleton": [
+        "0078"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0455"
+      ],
+      "skeleton": [
+        "0073"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0456"
+      ],
+      "skeleton": [
+        "0069"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0458"
+      ],
+      "skeleton": [
+        "006A"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "04BB"
+      ],
+      "skeleton": [
+        "0068"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "04CF"
+      ],
+      "skeleton": [
+        "006C"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0501"
+      ],
+      "skeleton": [
+        "0064"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "04AF"
+      ],
+      "skeleton": [
+        "0075"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0410"
+      ],
+      "skeleton": [
+        "0041"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0412"
+      ],
+      "skeleton": [
+        "0042"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0415"
+      ],
+      "skeleton": [
+        "0045"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "041A"
+      ],
+      "skeleton": [
+        "004B"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "041C"
+      ],
+      "skeleton": [
+        "004D"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "041D"
+      ],
+      "skeleton": [
+        "0048"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "041E"
+      ],
+      "skeleton": [
+        "004F"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0420"
+      ],
+      "skeleton": [
+        "0050"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0421"
+      ],
+      "skeleton": [
+        "0043"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0422"
+      ],
+      "skeleton": [
+        "0054"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0425"
+      ],
+      "skeleton": [
+        "0058"
+      ],
+      "scripts": [
+        "Cyrillic"
+      ],
+      "note": "Cyrillic letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03B1"
+      ],
+      "skeleton": [
+        "0061"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03B5"
+      ],
+      "skeleton": [
+        "0065"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03B9"
+      ],
+      "skeleton": [
+        "0069"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03BD"
+      ],
+      "skeleton": [
+        "0076"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03BF"
+      ],
+      "skeleton": [
+        "006F"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03C1"
+      ],
+      "skeleton": [
+        "0070"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03C5"
+      ],
+      "skeleton": [
+        "0075"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0391"
+      ],
+      "skeleton": [
+        "0041"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0392"
+      ],
+      "skeleton": [
+        "0042"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0395"
+      ],
+      "skeleton": [
+        "0045"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0396"
+      ],
+      "skeleton": [
+        "005A"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0397"
+      ],
+      "skeleton": [
+        "0048"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "0399"
+      ],
+      "skeleton": [
+        "0049"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "039A"
+      ],
+      "skeleton": [
+        "004B"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "039C"
+      ],
+      "skeleton": [
+        "004D"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "039D"
+      ],
+      "skeleton": [
+        "004E"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "039F"
+      ],
+      "skeleton": [
+        "004F"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03A1"
+      ],
+      "skeleton": [
+        "0050"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03A4"
+      ],
+      "skeleton": [
+        "0054"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03A5"
+      ],
+      "skeleton": [
+        "0055"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    },
+    {
+      "match": [
+        "03A7"
+      ],
+      "skeleton": [
+        "0058"
+      ],
+      "scripts": [
+        "Greek"
+      ],
+      "note": "Greek letter confusable with Latin",
+      "source": "curated UTS#39 subset"
+    }
+  ]
+}

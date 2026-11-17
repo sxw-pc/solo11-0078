@@ -21,15 +21,19 @@ from .models import (
     SEVERITY_RANK,
     SourceLoad,
     SourceRecord,
+    VisualCandidate,
 )
 from .planner import build_plan
 from .transforms import (
     UNIT_SEPARATOR,
     analyze_text,
+    analyze_visual_confusables,
     apply_transform,
     escaped_text,
     format_raw_values,
     has_unit_separator,
+    key_visual_profile,
+    load_confusable_map,
     sanitize_text,
     sha256_text,
     utf8_bytes,
@@ -41,10 +45,16 @@ def now_iso() -> str:
 
 
 def compute_run_id(config: AppConfig, loads: Iterable[SourceLoad]) -> str:
+    confusables = load_confusable_map()
     payload = {
         "schema": "charorder/run/v1",
         "tool_version": __version__,
         "unicode_version": UNICODE_VERSION,
+        # The map is part of the evidence. If the bundled snapshot changes, the
+        # run ID must change even when the tool version string does not.
+        "visual_map_sha256": confusables.map_sha256,
+        "visual_map_version": confusables.map_version,
+        "visual_skeleton_version": confusables.skeleton_version,
         "config_sha256": config.config_sha256,
         "sources": [
             {
@@ -269,6 +279,33 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
             severity=config.severity_for(reason),
         )
 
+    visual_candidates = _build_visual_candidates(config, run_id, key_results)
+    for candidate in visual_candidates:
+        add_finding(
+            "VISUAL_CONFUSABLE_CANDIDATE",
+            (
+                f"规则 {candidate.rule_id} 的 {len(candidate.members)} 个二进制不同的目标键"
+                f"共享视觉骨架 {candidate.skeleton_escaped}；这是需人工核验的视觉风险，"
+                "不是数据库唯一碰撞"
+            ),
+            source_id=candidate.source_id,
+            rule_id=candidate.rule_id,
+            details={
+                "candidate_id": candidate.candidate_id,
+                "skeleton": candidate.skeleton_escaped,
+                "skeleton_sha256": candidate.skeleton_sha256,
+                "skeleton_version": candidate.skeleton_version,
+                "map_version": candidate.map_version,
+                "policy_mode": candidate.policy_mode,
+                "status": candidate.status,
+                "risk_level": candidate.risk_level,
+                "cross_script": candidate.cross_script,
+                "unknown_coverage": candidate.unknown_coverage,
+                "members": candidate.members,
+            },
+            severity=config.severity_for("VISUAL_CONFUSABLE_CANDIDATE"),
+        )
+
     findings.sort(
         key=lambda finding: (
             SEVERITY_RANK.get(finding.severity, 9),
@@ -287,6 +324,7 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
         key_results,
         findings,
         collisions,
+        visual_candidates,
     )
     verdict = _verdict(summary)
     result = ScanResult(
@@ -301,6 +339,7 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
         summary=summary,
         verdict=verdict,
         plan={},
+        visual_candidates=visual_candidates,
     )
     result.plan = build_plan(result)
     return result
@@ -387,6 +426,24 @@ def _evaluate_key(
         key_hash = sha256_text(safe_key)
         key_bytes = len(utf8_bytes(safe_key))
         key_chars = len(safe_key)
+        if rule.script_policy is not None:
+            # Visual/script evidence is computed on the *transformed* key, but
+            # stored under its own codes so it never masks byte-level findings.
+            # Rules without a script_policy are out of scope for this preflight.
+            for issue in analyze_visual_confusables(
+                safe_key,
+                column=rule.columns[0] if len(rule.columns) == 1 else None,
+                policy=rule.script_policy,
+            ):
+                defects.append(
+                    Defect(
+                        code=issue.code,
+                        severity=config.severity_for(issue.code),
+                        message=issue.message,
+                        details=issue.details,
+                        column=issue.column,
+                    )
+                )
         if rule.max_bytes is not None and key_bytes > rule.max_bytes:
             defects.append(
                 Defect(
@@ -419,6 +476,11 @@ def _evaluate_key(
     safe_raw_values = tuple(
         None if value is None else sanitize_text(value) for value in raw_components
     )
+    visual_profile = (
+        key_visual_profile(safe_key)
+        if target_key is not None and rule.script_policy is not None
+        else None
+    )
     return KeyResult(
         key_result_id=_key_result_id(
             run_id, rule.source_id, rule.id, record.record_ref
@@ -437,7 +499,180 @@ def _evaluate_key(
         key_chars=key_chars,
         changed=changed,
         defects=defects,
+        visual_profile=visual_profile,
     )
+
+
+def _build_visual_candidates(
+    config: AppConfig,
+    run_id: str,
+    key_results: list[KeyResult],
+) -> list[VisualCandidate]:
+    """Group *different-byte* keys that share a visual skeleton.
+
+    Keys that are exactly equal are deliberately excluded: those remain
+    NORMALIZATION_COLLISION / DUPLICATE_KEY evidence produced above. A key whose
+    map coverage is unknown can still be grouped, but the candidate is marked
+    ``unknown_coverage`` and its risk level is ``unknown`` rather than absent.
+    """
+
+    confusables = load_confusable_map()
+    review_map = config.visual_review_map
+    rule_lookup = config.key_map
+    source_order = {source.id: index for index, source in enumerate(config.sources)}
+    rule_order = {rule.id: index for index, rule in enumerate(config.keys)}
+
+    def sort_key(item: KeyResult) -> tuple[int, int, str, int, str]:
+        return (
+            source_order.get(item.source_id, 999),
+            rule_order.get(item.rule_id, 999),
+            item.record_ref,
+            item.ordinal,
+        )
+
+    grouped: dict[tuple[str, str], list[KeyResult]] = defaultdict(list)
+    for result in key_results:
+        if result.target_key is None or not result.visual_profile:
+            continue
+        profile = result.visual_profile
+        grouped[(result.rule_id, profile["skeleton_sha256"])].append(result)
+
+    candidates: list[VisualCandidate] = []
+    for (rule_id, skeleton_sha256), participants in sorted(
+        grouped.items(),
+        key=lambda item: (
+            source_order.get(rule_lookup[item[0][0]].source_id, 999),
+            rule_order.get(item[0][0], 999),
+            item[0][1],
+        ),
+    ):
+        # Visual evidence only exists *between* different binary keys. Exact
+        # duplicates were already handled as byte-level collisions, so each
+        # distinct target_key contributes exactly one representative member and
+        # its duplicates stay in NORMALIZATION_COLLISION / DUPLICATE_KEY.
+        participants.sort(key=sort_key)
+        by_key: dict[str, list[KeyResult]] = defaultdict(list)
+        for participant in participants:
+            by_key[participant.target_key or ""].append(participant)
+        if len(by_key) < 2:
+            continue
+        representatives = [
+            records[0] for _, records in sorted(by_key.items(), key=lambda item: item[0])
+        ]
+        representative = representatives[0].visual_profile or {}
+        rule = rule_lookup[rule_id]
+        policy = rule.script_policy
+        members: list[dict[str, Any]] = []
+        scripts: set[str] = set()
+        unknown = False
+        for participant in representatives:
+            profile = participant.visual_profile or {}
+            for script in profile.get("scripts", []):
+                scripts.add(script)
+            if profile.get("unknown_codepoints") or profile.get("unknown_scripts"):
+                unknown = True
+            key_sha = participant.key_sha256 or ""
+            duplicates = [
+                other.record_ref
+                for other in by_key.get(participant.target_key or "", [])
+                if other.key_result_id != participant.key_result_id
+            ]
+            members.append(
+                {
+                    "key_result_id": participant.key_result_id,
+                    "record_ref": participant.record_ref,
+                    "record_id": participant.record_id,
+                    "target_key": participant.target_key,
+                    "target_key_escaped": participant.target_key_escaped,
+                    "target_key_sha256": key_sha,
+                    "raw_display": participant.raw_display,
+                    "scripts": list(profile.get("scripts", [])),
+                    "codepoints": profile.get("codepoints", []),
+                    "skeleton": profile.get("skeleton", ""),
+                    "skeleton_escaped": profile.get("skeleton_escaped", ""),
+                    "skeleton_codepoints": profile.get("skeleton_codepoints", []),
+                    "coverage": profile.get("coverage"),
+                    # Full recursive mapping chain for multi-codepoint,
+                    # combining and mixed-script evidence.
+                    "mapping_chain": profile.get("chain", []),
+                    # Exact duplicates of this binary key remain byte-level
+                    # collision evidence; they are listed but not new members.
+                    "exact_duplicate_record_refs": duplicates,
+                }
+            )
+
+        cross_script = len(scripts) >= 2
+        policy_mode = policy.mode if policy is not None else "none"
+        if unknown:
+            risk_level = "unknown"
+        elif cross_script:
+            risk_level = "high"
+        else:
+            risk_level = "medium"
+
+        review = review_map.get((rule_id, skeleton_sha256))
+        review_versions_match = True
+        if review is None:
+            status = "review_required"
+            conclusion = None
+            reviewer = None
+            review_note = ""
+            decided_at = ""
+        else:
+            status = "reviewed"
+            conclusion = review.conclusion
+            reviewer = review.reviewer
+            review_note = review.note
+            decided_at = review.decided_at
+            # A conclusion is only valid for the map/skeleton version it was
+            # recorded against. If a review pins versions and they differ, the
+            # candidate returns to ``review_required`` rather than inheriting a
+            # stale sign-off.
+            review_versions_match = (
+                (not review.map_version
+                 or review.map_version == confusables.map_version)
+                and (not review.skeleton_version
+                     or review.skeleton_version == confusables.skeleton_version)
+            )
+            if not review_versions_match:
+                status = "review_required"
+                conclusion = None
+                reviewer = None
+                review_note = (
+                    f"已忽略旧版本复核（map={review.map_version or '未记录'}, "
+                    f"skeleton={review.skeleton_version or '未记录'}）"
+                )
+                decided_at = ""
+
+        candidate_id = _visual_candidate_id(run_id, rule_id, skeleton_sha256)
+        for participant in representatives:
+            participant.visual_candidate_ids.append(candidate_id)
+        candidates.append(
+            VisualCandidate(
+                candidate_id=candidate_id,
+                rule_id=rule_id,
+                source_id=rule.source_id,
+                skeleton=representative.get("skeleton", ""),
+                skeleton_escaped=representative.get("skeleton_escaped", ""),
+                skeleton_sha256=skeleton_sha256,
+                skeleton_version=representative.get("skeleton_version", "")
+                or confusables.skeleton_version,
+                map_version=representative.get("map_version", "")
+                or confusables.map_version,
+                policy_mode=policy_mode,
+                status=status,
+                risk_level=risk_level,
+                members=members,
+                cross_script=cross_script,
+                unknown_coverage=unknown,
+                requires_review=True,
+                conclusion=conclusion,
+                reviewer=reviewer,
+                review_note=review_note,
+                decided_at=decided_at,
+            )
+        )
+    return candidates
 
 
 def _duplicate_record_ids(records: list[SourceRecord]) -> dict[str, list[str]]:
@@ -459,10 +694,17 @@ def _summarize(
     results: list[KeyResult],
     findings: list[Finding],
     collisions: list[CollisionGroup],
+    visual_candidates: list[VisualCandidate] | None = None,
 ) -> dict[str, Any]:
+    visual_candidates = visual_candidates or []
     severity_counts = Counter(finding.severity for finding in findings)
     code_counts = Counter(finding.code for finding in findings)
     source_order = {source.id: index for index, source in enumerate(config.sources)}
+
+    visual_by_rule: dict[str, list[VisualCandidate]] = defaultdict(list)
+    for candidate in visual_candidates:
+        visual_by_rule[candidate.rule_id].append(candidate)
+    confusables = load_confusable_map()
 
     rule_summaries: list[dict[str, Any]] = []
     for rule in config.keys:
@@ -472,6 +714,7 @@ def _summarize(
             collision for collision in collisions if collision.rule_id == rule.id
         ]
         rule_severity = Counter(finding.severity for finding in related_findings)
+        rule_visual = visual_by_rule.get(rule.id, [])
         rule_summaries.append(
             {
                 "rule_id": rule.id,
@@ -493,6 +736,24 @@ def _summarize(
                         defect.code in {"KEY_TOO_LONG_BYTES", "KEY_TOO_LONG_CHARS"}
                         for defect in result.defects
                     )
+                ),
+                "script_policy": (
+                    rule.script_policy.as_dict() if rule.script_policy else None
+                ),
+                "visual_candidate_groups": len(rule_visual),
+                "visual_candidate_records": sum(
+                    len(candidate.members) for candidate in rule_visual
+                ),
+                "visual_pending_reviews": sum(
+                    1 for candidate in rule_visual if candidate.status == "review_required"
+                ),
+                "visual_unknown_coverage": sum(
+                    1 for candidate in rule_visual if candidate.unknown_coverage
+                ),
+                "visual_coverage_unknown_records": sum(
+                    1
+                    for finding in related_findings
+                    if finding.code == "VISUAL_COVERAGE_UNKNOWN"
                 ),
                 "findings": len(related_findings),
                 "findings_by_severity": {
@@ -557,6 +818,29 @@ def _summarize(
         "findings_by_code": dict(sorted(code_counts.items())),
         "collision_groups": len(collisions),
         "collision_records": sum(len(group.participants) for group in collisions),
+        "visual_candidate_groups": len(visual_candidates),
+        "visual_candidate_records": sum(
+            len(candidate.members) for candidate in visual_candidates
+        ),
+        "visual_pending_reviews": sum(
+            1 for candidate in visual_candidates if candidate.status == "review_required"
+        ),
+        "visual_unknown_coverage": sum(
+            1 for candidate in visual_candidates if candidate.unknown_coverage
+        ),
+        "visual_coverage_unknown_findings": sum(
+            1 for finding in findings if finding.code == "VISUAL_COVERAGE_UNKNOWN"
+        ),
+        "visual_confusable_map": confusables.version_info(),
+        # Scope is explicit: the precheck runs on rules that declare a
+        # script_policy. Rules without one are counted here so a reviewer can
+        # see that they are outside the visual precheck's scope.
+        "rules_with_script_policy": sum(
+            1 for rule in config.keys if rule.script_policy is not None
+        ),
+        "rules_without_script_policy": sum(
+            1 for rule in config.keys if rule.script_policy is None
+        ),
         "overlength_keys": sum(
             1
             for result in results
@@ -630,3 +914,15 @@ def _collision_id(run_id: str, rule_id: str, target_key: str) -> str:
         + utf8_bytes(target_key)
     ).hexdigest()
     return "C-" + digest[:16]
+
+
+def _visual_candidate_id(run_id: str, rule_id: str, skeleton_sha256: str) -> str:
+    digest = hashlib.sha256(
+        b"visual|"
+        + run_id.encode("ascii")
+        + b"|"
+        + rule_id.encode("utf-8")
+        + b"|"
+        + skeleton_sha256.encode("ascii")
+    ).hexdigest()
+    return "V-" + digest[:16]
