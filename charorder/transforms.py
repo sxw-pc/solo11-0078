@@ -12,6 +12,128 @@ from .models import TransformSpec
 
 UNIT_SEPARATOR = "\x1f"
 
+# --- Versioned composite-key framing (opt-in) ---------------------------------
+# The legacy encoding joins transformed components with U+001F, which is
+# ambiguous whenever a component itself contains U+001F. Version 1 instead
+# emits a self-delimiting length-prefixed frame per component:
+#
+#     FRAME_MARKER "v1:" <decimal codepoint count> ":" <component>
+#
+# repeated for every component, including empty ones. Because each frame
+# declares exactly how many code points its payload spans, no byte sequence
+# inside a payload (U+001F, the frame marker, backslashes, escape-like text,
+# multi-byte Unicode, ...) can ever be interpreted as framing. Encoding and
+# decoding are total, deterministic inverses; the frame carries an explicit
+# version marker so a target index can tell the two encodings apart and never
+# mixes them.
+FRAME_MARKER = "\x01"
+FRAME_VERSION = "v1"
+FRAME_PREFIX = FRAME_MARKER + FRAME_VERSION + ":"
+# Frame payloads may transport any code point; control characters inside a
+# payload are still audited but do not break the framing.
+FRAME_STRUCTURAL_CONTROLS = frozenset({FRAME_MARKER})
+
+
+class VersionedKeyError(ValueError):
+    """Raised when a versioned key frame cannot be decoded."""
+
+
+def encode_versioned_key(components: list[str]) -> str:
+    """Encode an arbitrary component sequence into a reversible v1 frame.
+
+    Every input is accepted, including empty strings and components that
+    contain U+001F, the frame marker, or backslash/escape-like text. No
+    substitution or escaping of payload bytes is performed, so payload text
+    that merely looks like an escape sequence cannot collide with framing.
+    """
+
+    frames = [FRAME_PREFIX]
+    for component in components:
+        if not isinstance(component, str):
+            raise TypeError("版本化复合键的分量必须是字符串。")
+        frames.append(str(len(component)))
+        frames.append(":")
+        frames.append(component)
+    return "".join(frames)
+
+
+def decode_versioned_key(framed_key: str) -> list[str]:
+    """Decode a v1 frame back to the exact original component sequence.
+
+    Raises VersionedKeyError on any structural violation (missing marker,
+    non-numeric length, truncated payload, trailing bytes). A well-formed
+    frame always decodes successfully, including frames carrying empty
+    components or control characters.
+    """
+
+    if not isinstance(framed_key, str):
+        raise VersionedKeyError("版本化复合键必须是字符串。")
+    marker_len = len(FRAME_MARKER)
+    if not framed_key.startswith(FRAME_PREFIX):
+        raise VersionedKeyError("缺少版本化复合键的版本标记。")
+    position = len(FRAME_PREFIX)
+    components: list[str] = []
+    total = len(framed_key)
+    while position < total:
+        separator = framed_key.find(":", position)
+        if separator == -1:
+            raise VersionedKeyError("分帧缺少长度分隔符。")
+        length_text = framed_key[position:separator]
+        if not length_text.isdigit() or (
+            len(length_text) > 1 and length_text.startswith("0")
+        ):
+            raise VersionedKeyError("分帧长度字段不是规范十进制非负整数。")
+        length = int(length_text)
+        payload_start = separator + 1
+        payload_end = payload_start + length
+        if payload_end > total:
+            raise VersionedKeyError("分帧声明的分量长度超出键范围。")
+        components.append(framed_key[payload_start:payload_end])
+        position = payload_end
+    return components
+
+
+def is_versioned_key(text: str | None) -> bool:
+    """Return True only when *text* parses completely as a v1 frame.
+
+    Merely starting with the marker is not enough: the whole string must
+    satisfy the frame grammar, so payload content resembling a marker cannot
+    be mistaken for a versioned key.
+    """
+
+    if not text or not text.startswith(FRAME_PREFIX):
+        return False
+    try:
+        decode_versioned_key(text)
+    except VersionedKeyError:
+        return False
+    return True
+
+
+def versioned_roundtrip_ok(components: list[str]) -> bool:
+    """Evidence helper: encode then decode must reproduce the tuple exactly."""
+
+    return decode_versioned_key(encode_versioned_key(components)) == list(components)
+
+
+def payload_control_codepoints(components: list[str]) -> list[str]:
+    """List reserved/control code points carried inside frame payloads.
+
+    The frame marker is structural and excluded; everything else in the Cc/Cf
+    categories (U+001F included) is reported for data-governance purposes
+    without affecting reversibility.
+    """
+
+    seen: set[str] = set()
+    for component in components:
+        for ch in component:
+            if ch in FRAME_STRUCTURAL_CONTROLS:
+                continue
+            if unicodedata.category(ch) in {"Cc", "Cf"}:
+                seen.add(ch)
+    return sorted(seen, key=ord)
+
+
 _MOJIBAKE_RE = re.compile(r"(?:Ã[\u0080-¿]|Â[\u0080-¿]|â€[\u0080-™]|ï»¿)")
 _BIDI_CONTROLS = {
     "؜",

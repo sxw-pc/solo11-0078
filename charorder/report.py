@@ -70,6 +70,71 @@ def _status_badge(status: str) -> str:
     )
 
 
+def _render_rehearsal_html(result: ScanResult) -> str:
+    if not result.rehearsals:
+        return (
+            '<div class="empty-state"><strong>未启用版本化复合键</strong>'
+            "<span>规则未显式 opt-in <code>key_encoding: v1</code>；复合键沿用 legacy "
+            "U+001F 拼接，含分隔符的记录保持 blocked。</span></div>"
+        )
+    cards = []
+    for rehearsal in result.rehearsals:
+        row_html = "\n".join(
+            f"""
+              <tr>
+                <td class="mono">{_e(row.record_ref)}</td>
+                <td class="num">{row.legacy_key_bytes}</td>
+                <td class="num">{row.versioned_key_bytes}</td>
+                <td class="num">{row.versioned_key_chars}</td>
+                <td class="mono value-cell">{_e(_json_text(row.source_components, limit=800))}</td>
+                <td class="mono">{_e(', '.join(row.blockers) or '—')}</td>
+              </tr>"""
+            for row in rehearsal.rows
+        )
+        ambiguity = ""
+        if rehearsal.legacy_ambiguous_strings:
+            items = "".join(
+                f"<li><code>{_e(item['legacy_key_escaped'])}</code> → "
+                f"{item['distinct_component_tuples']} 个不同分量元组，记录 "
+                f"{_e(', '.join(item['record_refs']))}</li>"
+                for item in rehearsal.legacy_ambiguous_strings
+            )
+            ambiguity = (
+                '<div class="collision-key"><span class="tiny-label">legacy 结构歧义串'
+                "（不得当作同一业务对象）</span><ul>" + items + "</ul></div>"
+            )
+        cards.append(
+            f"""
+        <article class="collision-card">
+          <header>
+            <div>
+              <div class="eyebrow small">{_e(rehearsal.encoding)} · 帧 {_e(rehearsal.frame_prefix_escaped)}</div>
+              <h3><span class="mono">{_e(rehearsal.rule_id)}</span></h3>
+            </div>
+            <span class="count-chip">{len(rehearsal.rows)} 行</span>
+          </header>
+          <p class="muted small">以源记录原始分量与既有 TransformSpec 权威重算；legacy 键仅保留摘要，
+            绝不从歧义 legacy 串反向拆分旧对象。</p>
+          {ambiguity}
+          <div class="table-scroll compact">
+            <table>
+              <thead><tr><th>记录</th><th>old 字节</th><th>new 字节</th><th>new 字符</th><th>回滚原始分量</th><th>阻断</th></tr></thead>
+              <tbody>{row_html}</tbody>
+            </table>
+          </div>
+          <p class="note">合同 A legacy：<strong>{_e(rehearsal.legacy_contract)}</strong>
+            {('（' + _e(', '.join(rehearsal.legacy_contract_blockers)) + '）') if rehearsal.legacy_contract_blockers else ''}
+            ；合同 B 版本化切换：<strong>{_e(rehearsal.versioned_contract)}</strong>
+            {('（' + _e(', '.join(rehearsal.versioned_contract_blockers)) + '）') if rehearsal.versioned_contract_blockers else '（全量检查通过）'}。
+            新键碰撞组 {len(rehearsal.versioned_collision_groups)} · 空键 {len(rehearsal.versioned_empty_record_refs)}
+            · 超限 {len(rehearsal.versioned_overlength_record_refs)} · 索引混用
+            {'是' if rehearsal.index_encoding_mix else '否'} · 无法归属清单键
+            {len(rehearsal.unattributable_inventory_keys)}。</p>
+        </article>"""
+        )
+    return "\n".join(cards)
+
+
 def render_markdown(result: ScanResult) -> str:
     summary = result.summary
     plan = result.plan
@@ -194,6 +259,71 @@ def render_markdown(result: ScanResult) -> str:
                 f"另有 {omitted} 项见 `findings.json` 与台账。"
             )
 
+    lines.extend(["", "## 版本化复合键编码预演", ""])
+    if not result.rehearsals:
+        lines.append(
+            "未启用版本化复合键（规则未显式 opt-in `key_encoding: v1`）；"
+            "复合键继续使用 legacy U+001F 拼接，含分隔符的记录保持 blocked。"
+        )
+    else:
+        lines.append(
+            "预演以源记录的**原始分量**与既有 TransformSpec 为权威重算新键，"
+            "legacy 键仅保留摘要，绝不从歧义 legacy 串反向拆分旧对象。"
+        )
+        for rehearsal in result.rehearsals:
+            lines.extend(
+                [
+                    "",
+                    f"### 规则 `{rehearsal.rule_id}` · 帧 `{rehearsal.frame_prefix_escaped}`",
+                    "",
+                    f"- 分量列：{_md_code(' + '.join(rehearsal.columns))}",
+                    f"- 合同 A（legacy）：**{_md(rehearsal.legacy_contract)}**"
+                    + (
+                        f"；阻断码：{_md(', '.join(rehearsal.legacy_contract_blockers))}"
+                        if rehearsal.legacy_contract_blockers
+                        else ""
+                    ),
+                    f"- 合同 B（版本化切换）：**{_md(rehearsal.versioned_contract)}**"
+                    + (
+                        f"；阻断码：{_md(', '.join(rehearsal.versioned_contract_blockers))}"
+                        if rehearsal.versioned_contract_blockers
+                        else "；全量唯一、非空、长度与索引归属检查通过"
+                    ),
+                    f"- 新键碰撞组：{len(rehearsal.versioned_collision_groups)}"
+                    f" · 空键：{len(rehearsal.versioned_empty_record_refs)}"
+                    f" · 超限：{len(rehearsal.versioned_overlength_record_refs)}"
+                    f" · 携带控制字符（可逆，登记）：{len(rehearsal.payload_control_record_refs)}",
+                    f"- 目标索引清单：{rehearsal.inventory_size} 条"
+                    f" · 无法归属：{len(rehearsal.unattributable_inventory_keys)}"
+                    f" · 旧/新编码混用：{'是' if rehearsal.index_encoding_mix else '否'}",
+                ]
+            )
+            if rehearsal.legacy_ambiguous_strings:
+                lines.append("")
+                lines.append("**legacy 结构歧义串（不得当作同一业务对象）：**")
+                for item in rehearsal.legacy_ambiguous_strings:
+                    lines.append(
+                        f"- {_md_code(item['legacy_key_escaped'])} → "
+                        f"{item['distinct_component_tuples']} 个不同分量元组，"
+                        f"记录 {_md(', '.join(item['record_refs']))}"
+                    )
+            lines.append("")
+            lines.append("| 记录 | old 键字节 | new 键字节 | new 键字符 | 回滚原始分量 | 阻断 |")
+            lines.append("|---|---:|---:|---:|---|---|")
+            for row in rehearsal.rows:
+                rollback = _md_code(
+                    json.dumps(row.source_components, ensure_ascii=False)
+                )
+                lines.append(
+                    f"| {_md(row.record_ref)} | {row.legacy_key_bytes} | "
+                    f"{row.versioned_key_bytes} | {row.versioned_key_chars} | "
+                    f"{rollback} | {_md(', '.join(row.blockers) or '—')} |"
+                )
+            lines.append(
+                "\n> 回滚依据 `composite_rehearsals.json` 中每行的 original_components，"
+                "经同一 TransformSpec 重算 legacy 键；不写源数据或目标库。"
+            )
+
     lines.extend(["", "## 迁移计划", ""])
     for step in plan["steps"]:
         lines.append(
@@ -308,6 +438,27 @@ def render_plan_markdown(result: ScanResult) -> str:
                     f"{_md(', '.join(str(item) for item in example['record_ids'] if item is not None) or '—')} |"
                 )
             lines.append("")
+    lines.extend(["", "## 版本化复合键预演合同", ""])
+    if not result.rehearsals:
+        lines.append("未启用版本化复合键（无规则 opt-in `key_encoding: v1`）。")
+    else:
+        lines.append(
+            "| 规则 | 帧 | legacy 合同 | 版本化合同 | 新键碰撞 | 空键 | 超限 | 索引混用 | 无法归属 |",
+        )
+        lines.append("|---|---|---|---|---:|---:|---:|---|---:|")
+        for rehearsal in result.rehearsals:
+            lines.append(
+                f"| {_md(rehearsal.rule_id)} | {_md(rehearsal.frame_prefix_escaped)} | "
+                f"{_md(rehearsal.legacy_contract)} | {_md(rehearsal.versioned_contract)} | "
+                f"{len(rehearsal.versioned_collision_groups)} | "
+                f"{len(rehearsal.versioned_empty_record_refs)} | "
+                f"{len(rehearsal.versioned_overlength_record_refs)} | "
+                f"{'是' if rehearsal.index_encoding_mix else '否'} | "
+                f"{len(rehearsal.unattributable_inventory_keys)} |"
+            )
+        lines.append(
+            "\n逐行 old/new 键字节与回滚原始分量见 `composite_rehearsals.json` 与 SQLite 台账。"
+        )
     lines.extend(
         [
             "## 禁止动作",
@@ -519,6 +670,8 @@ def render_html(result: ScanResult) -> str:
         </li>"""
         for step in plan["steps"]
     )
+
+    rehearsal_cards = _render_rehearsal_html(result)
 
     config = result.config
     high_findings = sev.get("high", 0)
@@ -829,7 +982,7 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
         <thead><tr><th>规则</th><th>源 / 列</th><th>目标位置</th><th>变换管线</th><th>记录</th><th>碰撞组</th><th>超限</th><th>约束</th><th>状态</th></tr></thead>
         <tbody>{''.join(rule_rows)}</tbody>
       </table>
-      <p class="note">变换顺序固定为：移除 Cf 不可见字符 → 宽度折叠 → Unicode 规范化 → 大小写映射 → 空白折叠 → 首尾清理。含多个列时使用 U+001F 作为复合键分隔符，并检查分隔符歧义。</p>
+      <p class="note">变换顺序固定为：移除 Cf 不可见字符 → 宽度折叠 → Unicode 规范化 → 大小写映射 → 空白折叠 → 首尾清理。legacy 复合键使用 U+001F 拼接并检查分隔符歧义；显式 opt-in <code>key_encoding: v1</code> 的规则改用带版本标记、长度前缀的可逆分帧，详见下方预演章节。</p>
     </div>
   </section>
 
@@ -859,6 +1012,11 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
       <div class="no-match" id="no-match">当前筛选没有匹配的风险项。</div>
       {f'<p class="note">页面仅展示前 {max_rows:,} 项，另有 {omitted_findings:,} 项见 findings.json 与台账；筛选仅作用于当前页面。</p>' if omitted_findings > 0 else ''}
     </div>
+  </section>
+
+  <section class="section" id="rehearsals">
+    <div class="section-head"><h2>版本化复合键编码预演</h2><p>opt-in 可逆分帧 · 旧歧义不猜 · 全量风险重判</p></div>
+    <div class="collisions">{rehearsal_cards}</div>
   </section>
 
   <section class="section" id="plan">

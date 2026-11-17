@@ -13,6 +13,7 @@ from typing import Any
 from .errors import ConfigError
 from .models import (
     DEFAULT_SEVERITIES,
+    KEY_ENCODINGS,
     SEVERITIES,
     AppConfig,
     KeyRule,
@@ -47,6 +48,8 @@ _KEY_FIELDS = {
     "required",
     "max_bytes",
     "max_chars",
+    "key_encoding",
+    "legacy_key_inventory",
 }
 _TRANSFORM_FIELDS = {
     "normalization",
@@ -275,6 +278,22 @@ def _parse_key(item: Any, index: int) -> KeyRule:
     max_bytes = _optional_positive_int(obj.get("max_bytes"), f"{where}.max_bytes")
     max_chars = _optional_positive_int(obj.get("max_chars"), f"{where}.max_chars")
 
+    key_encoding = _optional_str(
+        obj.get("key_encoding", "legacy"), f"{where}.key_encoding"
+    ).lower()
+    if key_encoding not in KEY_ENCODINGS:
+        raise ConfigError(
+            f"{where}.key_encoding 必须是 {' / '.join(KEY_ENCODINGS)}。"
+        )
+
+    inventory_obj = obj.get("legacy_key_inventory", [])
+    if not isinstance(inventory_obj, list) or any(
+        not isinstance(item, str) for item in inventory_obj
+    ):
+        raise ConfigError(f"{where}.legacy_key_inventory 必须是字符串数组。")
+    if len(inventory_obj) != len(set(inventory_obj)):
+        raise ConfigError(f"{where}.legacy_key_inventory 含重复条目。")
+
     return KeyRule(
         id=key_id,
         label=label,
@@ -287,6 +306,8 @@ def _parse_key(item: Any, index: int) -> KeyRule:
         required=required,
         max_bytes=max_bytes,
         max_chars=max_chars,
+        key_encoding=key_encoding,
+        legacy_key_inventory=tuple(inventory_obj),
     )
 
 

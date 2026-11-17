@@ -27,9 +27,12 @@ from .transforms import (
     UNIT_SEPARATOR,
     analyze_text,
     apply_transform,
+    decode_versioned_key,
+    encode_versioned_key,
     escaped_text,
     format_raw_values,
     has_unit_separator,
+    payload_control_codepoints,
     sanitize_text,
     sha256_text,
     utf8_bytes,
@@ -38,6 +41,19 @@ from .transforms import (
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+# Defects that only describe the opt-in versioned framing. They are kept on
+# KeyResult / in the rehearsal but never enter the legacy findings stream, so
+# enabling a rehearsal cannot change the legacy run verdict or gate counts.
+_VERSIONED_DEFECT_CODES = frozenset(
+    {
+        "VERSIONED_KEY_EMPTY",
+        "VERSIONED_KEY_TOO_LONG",
+        "VERSIONED_ROUNDTRIP_FAILED",
+        "VERSIONED_PAYLOAD_CONTROL",
+    }
+)
 
 
 def compute_run_id(config: AppConfig, loads: Iterable[SourceLoad]) -> str:
@@ -173,6 +189,12 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
                 result = _evaluate_key(config, run_id, rule, record)
                 key_results.append(result)
                 for defect in result.defects:
+                    # Versioned-framing defects belong to the opt-in rehearsal
+                    # contract and must not change the legacy run verdict,
+                    # summary counts, or migration gate. They remain attached
+                    # to the KeyResult and are re-judged in the rehearsal.
+                    if defect.code in _VERSIONED_DEFECT_CODES:
+                        continue
                     add_finding(
                         defect.code,
                         defect.message,
@@ -302,6 +324,12 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
         verdict=verdict,
         plan={},
     )
+    # Opt-in versioned composite-key rehearsal. This is an independent
+    # derivation over the same authoritative source components; it never
+    # mutates legacy findings, summaries, or the run verdict.
+    from .rehearsal import build_rehearsals
+
+    result.rehearsals = build_rehearsals(result)
     result.plan = build_plan(result)
     return result
 
@@ -351,11 +379,20 @@ def _evaluate_key(
     key_bytes = 0
     key_chars = 0
     changed = False
+    # Versioned framing outputs (only populated for opt-in v1 rules).
+    versioned_key: str | None = None
+    versioned_escaped: str | None = None
+    versioned_hash: str | None = None
+    versioned_bytes = 0
+    versioned_chars = 0
+    versioned_roundtrip: bool | None = None
+    transformed_components: list[str] | None = None
 
     if not missing_columns:
         assert all(component is not None for component in raw_components)
         components = [component for component in raw_components if component is not None]
         transformed = [apply_transform(component, rule.transform) for component in components]
+        transformed_components = transformed
         changed = any(before != after for before, after in zip(components, transformed))
         for column, transformed_value in zip(rule.columns, transformed):
             if has_unit_separator(transformed_value):
@@ -416,6 +453,89 @@ def _evaluate_key(
                 )
             )
 
+        if rule.versioned_framing:
+            # The versioned key is recomputed from the same authoritative
+            # transformed components, never split out of the legacy string.
+            framed_raw = encode_versioned_key(transformed)
+            framed_safe = sanitize_text(framed_raw)
+            try:
+                decoded = decode_versioned_key(framed_safe)
+            except Exception:  # pragma: no cover - defensive, framing is total
+                versioned_roundtrip = False
+            else:
+                versioned_roundtrip = decoded == transformed
+            if not versioned_roundtrip:
+                defects.append(
+                    Defect(
+                        code="VERSIONED_ROUNDTRIP_FAILED",
+                        severity=config.severity_for("VERSIONED_ROUNDTRIP_FAILED"),
+                        message=(
+                            "版本化复合键编码/解码不一致，分帧不满足可逆性合同"
+                        ),
+                        details={"rule_id": rule.id},
+                    )
+                )
+            versioned_key = framed_safe
+            versioned_escaped = escaped_text(framed_safe)
+            versioned_hash = sha256_text(framed_safe)
+            versioned_bytes = len(utf8_bytes(framed_safe))
+            versioned_chars = len(framed_safe)
+            if all(component == "" for component in transformed):
+                defects.append(
+                    Defect(
+                        code="VERSIONED_KEY_EMPTY",
+                        severity=config.severity_for("VERSIONED_KEY_EMPTY"),
+                        message=f"版本化复合键 {rule.id} 的全部分量为空",
+                        details={"framed_empty": True},
+                        column=rule.columns[0] if len(rule.columns) == 1 else None,
+                    )
+                )
+            if rule.max_bytes is not None and versioned_bytes > rule.max_bytes:
+                defects.append(
+                    Defect(
+                        code="VERSIONED_KEY_TOO_LONG",
+                        severity=config.severity_for("VERSIONED_KEY_TOO_LONG"),
+                        message=(
+                            f"版本化复合键 {versioned_bytes} UTF-8 字节，"
+                            f"超过声明上限 {rule.max_bytes}；可逆性不豁免长度门禁"
+                        ),
+                        details={
+                            "actual_bytes": versioned_bytes,
+                            "limit_bytes": rule.max_bytes,
+                        },
+                    )
+                )
+            if rule.max_chars is not None and versioned_chars > rule.max_chars:
+                defects.append(
+                    Defect(
+                        code="VERSIONED_KEY_TOO_LONG",
+                        severity=config.severity_for("VERSIONED_KEY_TOO_LONG"),
+                        message=(
+                            f"版本化复合键 {versioned_chars} 字符，"
+                            f"超过声明上限 {rule.max_chars}；可逆性不豁免长度门禁"
+                        ),
+                        details={
+                            "actual_chars": versioned_chars,
+                            "limit_chars": rule.max_chars,
+                        },
+                    )
+                )
+            payload_controls = payload_control_codepoints(transformed)
+            if payload_controls:
+                defects.append(
+                    Defect(
+                        code="VERSIONED_PAYLOAD_CONTROL",
+                        severity=config.severity_for("VERSIONED_PAYLOAD_CONTROL"),
+                        message=(
+                            "版本化复合键分量携带保留控制字符（含 U+001F）；"
+                            "分帧可逆但数据治理仍需登记"
+                        ),
+                        details={
+                            "codepoints": [f"U+{ord(ch):04X}" for ch in payload_controls],
+                        },
+                    )
+                )
+
     safe_raw_values = tuple(
         None if value is None else sanitize_text(value) for value in raw_components
     )
@@ -437,6 +557,12 @@ def _evaluate_key(
         key_chars=key_chars,
         changed=changed,
         defects=defects,
+        versioned_key=versioned_key,
+        versioned_key_escaped=versioned_escaped,
+        versioned_key_sha256=versioned_hash,
+        versioned_key_bytes=versioned_bytes,
+        versioned_key_chars=versioned_chars,
+        versioned_roundtrip_ok=versioned_roundtrip,
     )
 
 

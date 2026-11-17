@@ -150,6 +150,21 @@ def _run_command(
             f"超限键 {summary['overlength_keys']}"
         )
         print(f"结论：{result.verdict}")
+        if result.rehearsals:
+            ready = sum(
+                1
+                for rehearsal in result.rehearsals
+                if rehearsal.versioned_contract == "versioned_cutover"
+            )
+            blocked = sum(
+                1
+                for rehearsal in result.rehearsals
+                if rehearsal.legacy_contract == "legacy_blocked"
+            )
+            print(
+                f"版本化复合键预演：规则 {len(result.rehearsals)} 条 · "
+                f"可切换 {ready} 条 · legacy 阻断 {blocked} 条"
+            )
         print(f"运行 ID：{result.run_id}")
         print(f"输出：{output_dir.resolve()}")
         print(f"复核页：{(output_dir / 'report.html').resolve()}")

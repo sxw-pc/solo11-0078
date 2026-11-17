@@ -215,7 +215,7 @@ charorder/
 }
 ```
 
-- `columns`：单列或复合列；复合键按顺序以 `U+001F` 连接。
+- `columns`：单列或复合列；复合键按顺序以 `U+001F` 连接（legacy）或按版本化长度前缀分帧（`key_encoding: v1`，见 5.4）。
 - `normalization`：`none` / `NFC` / `NFD` / `NFKC` / `NFKD`。
 - `case`：`none` / `casefold` / `lower` / `upper`。
 - `width_fold`：是否对 East Asian Width `F/H` 片段做宽度折叠。
@@ -227,9 +227,28 @@ charorder/
 - `destination`：仅供计划和报告展示的目标表 / 列说明，不会被执行。
 - 空白字符串（`""` 或变换后为空）会产生 `EMPTY_KEY`，但仍然是一个可碰撞的键值。是否把空串视为非法，由业务在迁移处置中决定。
 
-### 5.4 复合键分隔符
+### 5.4 复合键分隔符与版本化分帧
 
-复合键固定使用 ASCII Unit Separator `U+001F`。若某个变换后的分量本身包含该字符，会生成高等级 `COMPOSITE_SEPARATOR` 风险，避免静默产生歧义键。
+复合键默认（`"key_encoding": "legacy"`）固定使用 ASCII Unit Separator `U+001F` 连接。若某个变换后的分量本身包含该字符，会生成高等级 `COMPOSITE_SEPARATOR` 风险——因为 `(a\u001fb, c)` 与 `(a, b\u001fc)` 会串成同一字节串，无法从 legacy 字符串倒推原元组。此类记录在 legacy 合同下保持 `blocked`，等待源数据治理；工具绝不凭歧义串拆分或合并旧对象。
+
+对需要合法承载 `U+001F` 的规则，可显式 opt-in 版本化分帧：
+
+```json
+{
+  "id": "name_company_v1",
+  "key_encoding": "v1",
+  "legacy_key_inventory": ["旧索引中已存在的键（可选，用于归属与混用检查）"]
+}
+```
+
+`v1` 帧为带版本标记的长度前缀编码，逐分量输出 `\x01v1:<码点数>:<分量>`：
+
+- **可逆且无结构碰撞**：长度按码点数声明，负载内任意字节（含 `U+001F`、帧标记 `U+0001`、反斜杠转义样式文本、多字节 Unicode、空串）都不会被当作分帧；不依赖任何字符串替换，因此“长得像转义”的原文不可能与分帧撞车。
+- **可识别版本标记**：所有 v1 键以 `\x01v1:` 开头且整体满足帧语法；仅前缀匹配但语法不完整的 legacy 串不会被误判为 v1。
+- **权威重算**：新键只由源记录的原始分量与既有 `TransformSpec` 重算，legacy 键仅保留摘要。源分量缺失、记录身份重复、旧键无法唯一归属时阻断自动转换。
+- **全量风险重判**：对全体记录重新检查唯一碰撞、空键、负载保留控制字符（可逆但登记）、`max_bytes` / `max_chars`；编码可逆不豁免任何门禁。
+- **两条独立合同**：`legacy_blocked`（含分隔符记录继续阻断）或 `versioned_cutover`（仅当原始分量可证且新编码全量无冲突、不超长、索引无旧/新混用时成立）。同一目标索引不得混用无版本区分的两种编码。
+- 预演只读取内存中的扫描结果，不写源数据或目标库；每行保留 old/new 键字节与回滚所需的原始分量。
 
 ---
 
@@ -245,8 +264,9 @@ charorder/
 | `plan.md` | 迁移计划的人类可读版本 |
 | `findings.json` | 全量风险清单、严重级别和检查码计数 |
 | `collisions.json` | 全量碰撞组及参与者 |
-| `keys.jsonl` | 每条记录 × 每条规则的原始值、目标键、转义值、字节数、哈希、缺陷与碰撞组 ID |
-| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members 及视图） |
+| `composite_rehearsals.json` | opt-in 版本化复合键预演：两合同结论、每行 old/new 键字节、回滚原始分量、索引归属与混用检查（无 v1 规则时为空清单） |
+| `keys.jsonl` | 每条记录 × 每条规则的原始值、目标键、转义值、字节数、哈希、缺陷与碰撞组 ID（v1 规则另含版本化键与往返一致性） |
+| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members / composite_rehearsals / composite_rehearsal_rows 及视图） |
 | `manifest.json` | 运行清单：产物哈希、计划哈希、源指纹、复跑命令 |
 
 默认输出目录为 `charorder-runs/<run-id>/`；显式传入 `--out` 可指定位置。目录非空时默认拒绝写入，需用 `--force` 覆盖已知产物名。工具不会清理目录中的未知文件。
@@ -294,8 +314,19 @@ WHERE m.group_id = 'C-...';
 | `COMPOSITE_SEPARATOR` | high | 变换后的分量含保留分隔符 `U+001F` |
 | `NORMALIZATION_COLLISION` | high | 不同原始值经变换后落入同一唯一键 |
 | `DUPLICATE_KEY` | high | 原始值本身相同，仍形成唯一键重复 |
+| `LEGACY_COMPOSITE_AMBIGUITY` | high | legacy 复合串被多个不同分量元组共享，无法倒推身份 |
+| `VERSIONED_KEY_COLLISION` | high | 版本化新键全量重算后仍碰撞（含与索引既有 v1 键相撞） |
+| `VERSIONED_KEY_EMPTY` | medium | 版本化复合键全部分量为空 |
+| `VERSIONED_KEY_TOO_LONG` | high | 版本化复合键超出 `max_bytes` / `max_chars`，可逆不豁免 |
+| `VERSIONED_ROUNDTRIP_FAILED` | high | 版本化帧编码/解码一致性失败 |
+| `VERSIONED_PAYLOAD_CONTROL` | low | 版本化分量负载携带保留控制字符（分帧可逆，仅登记治理） |
+| `VERSION_MARKER_CONFLICT` | high | 旧键以帧标记开头但不满足帧语法，存在伪装风险 |
+| `REHEARSAL_SOURCE_COMPONENT_MISSING` | high | 预演记录缺少权威源分量 |
+| `REHEARSAL_RECORD_IDENTITY_DUPLICATE` | high | 预演记录身份（record id）重复 |
+| `LEGACY_KEY_UNATTRIBUTABLE` | high | 索引旧键无法唯一归属到源记录 |
+| `TARGET_INDEX_ENCODING_MIX` | high | 同一目标索引混用无版本区分的 legacy / v1 编码 |
 
-可在配置的 `severity_overrides` 中逐项覆盖。
+`VERSIONED_*` 与预演专属检查只挂载在 `KeyResult` 和预演合同上，不进入 legacy 风险流，因此启用预演不会改变 legacy 运行结论与门禁计数。可在配置的 `severity_overrides` 中逐项覆盖。
 
 ---
 

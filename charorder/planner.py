@@ -49,6 +49,7 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 "required": rule.required,
                 "max_bytes": rule.max_bytes,
                 "max_chars": rule.max_chars,
+                "key_encoding": rule.key_encoding,
                 "transform": rule.transform.as_dict(),
                 "transform_text": rule.transform.describe(),
                 "status": status,
@@ -265,12 +266,17 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
         ],
         "sources_with_issues": source_invalid,
         "rules": rules,
+        "composite_key_rehearsals": [
+            rehearsal.to_dict() for rehearsal in result.rehearsals
+        ],
         "steps": steps,
         "forbidden_actions": [
             "不得由本工具自动合并、删除或改写碰撞记录",
             "不得自动“修复”疑似乱码而覆盖原值",
             "不得把校验失败的目标键直接写入生产唯一索引",
             "不得将源文件或 SQLite 台账当作可回写数据源",
+            "不得仅凭含 U+001F 的 legacy 复合键字符串反向拆分旧对象",
+            "不得在同一目标索引混用无版本区分的 legacy 与 v1 复合键",
         ],
         "reproduce": {
             "config_file": config.config_path.name,

@@ -19,6 +19,7 @@ _REQUIRED_ARTIFACTS = {
     "findings.json",
     "collisions.json",
     "keys.jsonl",
+    "composite_rehearsals.json",
     "ledger.sqlite",
 }
 _EXTERNAL_ASSET_PATTERNS = (

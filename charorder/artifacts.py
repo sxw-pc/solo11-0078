@@ -25,6 +25,7 @@ ARTIFACT_FILES = (
     "findings.json",
     "collisions.json",
     "keys.jsonl",
+    "composite_rehearsals.json",
     "ledger.sqlite",
     "manifest.json",
 )
@@ -76,12 +77,32 @@ def write_artifacts(
         },
         "collisions": [group.to_dict() for group in result.collisions],
     }
+    rehearsal_doc = {
+        "schema_version": 1,
+        "kind": "charorder.composite_key_rehearsals",
+        "run_id": result.run_id,
+        "counts": {
+            "rehearsals": len(result.rehearsals),
+            "versioned_cutover_ready": sum(
+                1
+                for rehearsal in result.rehearsals
+                if rehearsal.versioned_contract == "versioned_cutover"
+            ),
+            "legacy_blocked": sum(
+                1
+                for rehearsal in result.rehearsals
+                if rehearsal.legacy_contract == "legacy_blocked"
+            ),
+        },
+        "rehearsals": [rehearsal.to_dict() for rehearsal in result.rehearsals],
+    }
 
     artifacts: dict[str, bytes] = {
         "plan.json": plan_bytes,
         "plan.md": render_plan_markdown(result).encode("utf-8"),
         "findings.json": _json_bytes(findings_doc),
         "collisions.json": _json_bytes(collisions_doc),
+        "composite_rehearsals.json": _json_bytes(rehearsal_doc),
         "keys.jsonl": _jsonl_bytes(item.to_dict() for item in result.key_results),
         "report.md": render_markdown(result).encode("utf-8"),
         "report.html": render_html(result).encode("utf-8"),

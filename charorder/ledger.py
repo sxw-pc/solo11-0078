@@ -115,7 +115,13 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             key_chars INTEGER NOT NULL,
             changed INTEGER NOT NULL,
             collision_group_id TEXT,
-            defects_json TEXT NOT NULL
+            defects_json TEXT NOT NULL,
+            versioned_key TEXT,
+            versioned_key_escaped TEXT,
+            versioned_key_sha256 TEXT,
+            versioned_key_bytes INTEGER NOT NULL DEFAULT 0,
+            versioned_key_chars INTEGER NOT NULL DEFAULT 0,
+            versioned_roundtrip_ok INTEGER
         );
         CREATE TABLE findings (
             finding_id TEXT PRIMARY KEY,
@@ -149,6 +155,60 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             record_id TEXT,
             PRIMARY KEY (group_id, key_result_id)
         );
+        CREATE TABLE composite_rehearsals (
+            rehearsal_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            encoding TEXT NOT NULL,
+            frame_version TEXT NOT NULL,
+            frame_prefix_escaped TEXT NOT NULL,
+            columns_json TEXT NOT NULL,
+            transform_json TEXT NOT NULL,
+            is_unique INTEGER NOT NULL,
+            is_required INTEGER NOT NULL,
+            max_bytes INTEGER,
+            max_chars INTEGER,
+            row_count INTEGER NOT NULL,
+            legacy_contract TEXT NOT NULL,
+            legacy_contract_blockers_json TEXT NOT NULL,
+            blocked_record_refs_json TEXT NOT NULL,
+            versioned_contract TEXT NOT NULL,
+            versioned_contract_blockers_json TEXT NOT NULL,
+            versioned_collision_count INTEGER NOT NULL,
+            versioned_empty_record_refs_json TEXT NOT NULL,
+            versioned_overlength_record_refs_json TEXT NOT NULL,
+            payload_control_record_refs_json TEXT NOT NULL,
+            inventory_size INTEGER NOT NULL,
+            index_encoding_mix INTEGER NOT NULL,
+            unattributable_inventory_keys_json TEXT NOT NULL,
+            inventory_versioned_collisions_json TEXT NOT NULL,
+            legacy_ambiguous_strings_json TEXT NOT NULL,
+            rollback_json TEXT NOT NULL
+        );
+        CREATE TABLE composite_rehearsal_rows (
+            rehearsal_id TEXT NOT NULL,
+            key_result_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            record_ref TEXT NOT NULL,
+            record_id TEXT,
+            source_components_json TEXT NOT NULL,
+            transformed_components_json TEXT NOT NULL,
+            legacy_key TEXT,
+            legacy_key_sha256 TEXT,
+            legacy_key_bytes INTEGER NOT NULL,
+            versioned_key TEXT,
+            versioned_key_escaped TEXT,
+            versioned_key_sha256 TEXT,
+            versioned_key_bytes INTEGER NOT NULL,
+            versioned_key_chars INTEGER NOT NULL,
+            roundtrip_ok INTEGER,
+            blockers_json TEXT NOT NULL,
+            notes_json TEXT NOT NULL,
+            PRIMARY KEY (rehearsal_id, key_result_id)
+        );
         CREATE INDEX ix_key_results_rule ON key_results (rule_id, target_key);
         CREATE INDEX ix_key_results_source ON key_results (source_id, record_ref);
         CREATE INDEX ix_findings_severity ON findings (severity, code);
@@ -156,6 +216,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX ix_findings_rule ON findings (rule_id);
         CREATE INDEX ix_collisions_rule ON collisions (rule_id);
         CREATE INDEX ix_collision_members_record ON collision_members (record_ref);
+        CREATE INDEX ix_rehearsals_rule ON composite_rehearsals (rule_id);
+        CREATE INDEX ix_rehearsal_rows_record ON composite_rehearsal_rows (record_ref);
         CREATE VIEW finding_counts AS
             SELECT code, severity, COUNT(*) AS finding_count
             FROM findings
@@ -286,8 +348,10 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             key_result_id, run_id, source_id, rule_id, ordinal, record_ref,
             record_id, raw_values_json, raw_display, target_key,
             target_key_escaped, key_sha256, key_bytes, key_chars, changed,
-            collision_group_id, defects_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            collision_group_id, defects_json, versioned_key,
+            versioned_key_escaped, versioned_key_sha256, versioned_key_bytes,
+            versioned_key_chars, versioned_roundtrip_ok
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -319,6 +383,14 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                         for defect in item.defects
                     ]
                 ),
+                item.versioned_key,
+                item.versioned_key_escaped,
+                item.versioned_key_sha256,
+                item.versioned_key_bytes,
+                item.versioned_key_chars,
+                None
+                if item.versioned_roundtrip_ok is None
+                else int(item.versioned_roundtrip_ok),
             )
             for item in result.key_results
         ],
@@ -389,6 +461,94 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             for participant in group.participants
         ],
     )
+
+    for rehearsal in result.rehearsals:
+        connection.execute(
+            """
+            INSERT INTO composite_rehearsals (
+                rehearsal_id, run_id, rule_id, source_id, encoding,
+                frame_version, frame_prefix_escaped, columns_json,
+                transform_json, is_unique, is_required, max_bytes, max_chars,
+                row_count, legacy_contract, legacy_contract_blockers_json,
+                blocked_record_refs_json, versioned_contract,
+                versioned_contract_blockers_json, versioned_collision_count,
+                versioned_empty_record_refs_json,
+                versioned_overlength_record_refs_json,
+                payload_control_record_refs_json, inventory_size,
+                index_encoding_mix, unattributable_inventory_keys_json,
+                inventory_versioned_collisions_json,
+                legacy_ambiguous_strings_json, rollback_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rehearsal.rehearsal_id,
+                result.run_id,
+                rehearsal.rule_id,
+                rehearsal.source_id,
+                rehearsal.encoding,
+                rehearsal.frame_version,
+                rehearsal.frame_prefix_escaped,
+                _json(rehearsal.columns),
+                _json(rehearsal.transform),
+                int(rehearsal.unique),
+                int(rehearsal.required),
+                rehearsal.max_bytes,
+                rehearsal.max_chars,
+                len(rehearsal.rows),
+                rehearsal.legacy_contract,
+                _json(rehearsal.legacy_contract_blockers),
+                _json(rehearsal.blocked_record_refs),
+                rehearsal.versioned_contract,
+                _json(rehearsal.versioned_contract_blockers),
+                len(rehearsal.versioned_collision_groups),
+                _json(rehearsal.versioned_empty_record_refs),
+                _json(rehearsal.versioned_overlength_record_refs),
+                _json(rehearsal.payload_control_record_refs),
+                rehearsal.inventory_size,
+                int(rehearsal.index_encoding_mix),
+                _json(rehearsal.unattributable_inventory_keys),
+                _json(rehearsal.inventory_versioned_collisions),
+                _json(rehearsal.legacy_ambiguous_strings),
+                _json(rehearsal.rollback),
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO composite_rehearsal_rows (
+                rehearsal_id, key_result_id, run_id, rule_id, ordinal,
+                record_ref, record_id, source_components_json,
+                transformed_components_json, legacy_key, legacy_key_sha256,
+                legacy_key_bytes, versioned_key, versioned_key_escaped,
+                versioned_key_sha256, versioned_key_bytes,
+                versioned_key_chars, roundtrip_ok, blockers_json, notes_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    rehearsal.rehearsal_id,
+                    row.key_result_id,
+                    result.run_id,
+                    rehearsal.rule_id,
+                    row.ordinal,
+                    row.record_ref,
+                    row.record_id,
+                    _json(row.source_components),
+                    _json(row.transformed_components if row.transformed_components is not None else []),
+                    row.legacy_key,
+                    row.legacy_key_sha256,
+                    row.legacy_key_bytes,
+                    row.versioned_key,
+                    row.versioned_key_escaped,
+                    row.versioned_key_sha256,
+                    row.versioned_key_bytes,
+                    row.versioned_key_chars,
+                    None if row.roundtrip_ok is None else int(row.roundtrip_ok),
+                    _json(row.blockers),
+                    _json(row.notes),
+                )
+                for row in rehearsal.rows
+            ],
+        )
 
 
 def _record_pk(run_id: str, source_id: str, record_ref: str) -> str:

@@ -17,6 +17,7 @@ _ALLOWED_FILES = {
     "plan.md": "text/markdown; charset=utf-8",
     "findings.json": "application/json; charset=utf-8",
     "collisions.json": "application/json; charset=utf-8",
+    "composite_rehearsals.json": "application/json; charset=utf-8",
     "keys.jsonl": "application/x-ndjson; charset=utf-8",
     "ledger.sqlite": "application/vnd.sqlite3",
     "manifest.json": "application/json; charset=utf-8",
