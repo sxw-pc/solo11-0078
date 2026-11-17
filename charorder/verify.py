@@ -18,6 +18,7 @@ _REQUIRED_ARTIFACTS = {
     "plan.md",
     "findings.json",
     "collisions.json",
+    "certificates.json",
     "keys.jsonl",
     "ledger.sqlite",
 }

@@ -6,10 +6,15 @@ from collections import Counter
 from typing import Any, TYPE_CHECKING
 
 from . import APP_NAME, APP_SLUG, UNICODE_VERSION, __version__
-from .models import SEVERITIES
+from .models import (
+    CERT_LICENSE_LABEL,
+    CERT_STATUS_LABEL,
+    SEVERITIES,
+    SNAPSHOT_ORDER_LABEL,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .models import ScanResult
+    from .models import OrderingCertificate, ScanResult, SnapshotOrderObservation
 
 
 def build_plan(result: "ScanResult") -> dict[str, Any]:
@@ -24,6 +29,13 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
     high_findings = [finding for finding in result.findings if finding.severity == "high"]
     blocking_codes = Counter(finding.code for finding in high_findings)
     rule_stats = {item["rule_id"]: item for item in summary["rules"]}
+    certificates = {
+        certificate.rule_id: certificate for certificate in result.ordering_certificates
+    }
+    snapshots = {
+        observation.rule_id: observation
+        for observation in result.snapshot_observations
+    }
 
     rules: list[dict[str, Any]] = []
     for rule in config.keys:
@@ -38,6 +50,12 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             status = "review"
         else:
             status = "ready"
+        cutover = _rule_cutover_permission(
+            rule,
+            stats,
+            certificates.get(rule.id),
+        )
+        snapshot = snapshots.get(rule.id)
         rules.append(
             {
                 "rule_id": rule.id,
@@ -66,6 +84,9 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                         if finding.rule_id == rule.id
                     }
                 ),
+                "snapshot_order": _snapshot_block(snapshot),
+                "ordering_certificate": _certificate_block(certificates.get(rule.id)),
+                "cutover_permission": cutover,
             }
         )
 
@@ -196,16 +217,30 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
         },
         {
             "order": 7,
+            "phase": "ordering_certificate",
+            "title": "核验未来键域排序兼容证书与直译许可",
+            "status": _certificate_step_status(result),
+            "detail": _certificate_step_detail(result),
+            "acceptance": (
+                "仅当规则在声明有限域上被穷尽证明保序且唯一、碰撞与长度门禁同时通过时，"
+                "才允许把旧范围边界/seek 游标直译为目标 binary UTF-8 键；"
+                "有界搜索未穷尽只输出 unknown，未发现反例不得当作已证保序。"
+            ),
+            "evidence": ["plan.json", "certificates.json", "ledger.sqlite"],
+        },
+        {
+            "order": 8,
             "phase": "cutover",
             "title": "按门禁复跑并放行切换",
             "status": "pending",
             "detail": (
                 "使用同一配置复跑并启用 --fail-on high。"
-                "只有碰撞组为 0、高等级发现为 0、输入哈希未变化时才允许切换。"
+                "只有碰撞组为 0、高等级发现为 0、输入哈希未变化，"
+                "且范围/游标切换规则具备已证保序证书或已改走保守路线时才允许切换。"
             ),
             "acceptance": (
                 "复跑命令退出码为 0；manifest.json 校验通过；"
-                "碰撞组 0；所有必需键非空。"
+                "碰撞组 0；所有必需键非空；直译许可与证书状态一致。"
             ),
             "evidence": ["manifest.json", "report.html"],
         },
@@ -264,6 +299,20 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             for source in summary["sources"]
         ],
         "sources_with_issues": source_invalid,
+        "ordering_certificates": {
+            "target_order": "binary_utf8",
+            "unicode_version": UNICODE_VERSION,
+            "counts": summary["ordering_certificates"],
+            "certificates": [
+                certificate.to_dict() for certificate in result.ordering_certificates
+            ],
+        },
+        "snapshot_order_observations": [
+            observation.to_dict() for observation in result.snapshot_observations
+        ],
+        "cutover_permissions": {
+            rule["rule_id"]: rule["cutover_permission"] for rule in rules
+        },
         "rules": rules,
         "steps": steps,
         "forbidden_actions": [
@@ -282,3 +331,133 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             ),
         },
     }
+
+
+def _snapshot_block(snapshot: "SnapshotOrderObservation | None") -> dict[str, Any]:
+    if snapshot is None:
+        return {
+            "state": "no_records",
+            "state_label": SNAPSHOT_ORDER_LABEL["no_records"],
+            "records": 0,
+            "inversion_count": 0,
+            "confluence_count": 0,
+            "examples": [],
+        }
+    return {
+        "state": snapshot.state,
+        "state_label": SNAPSHOT_ORDER_LABEL.get(snapshot.state, snapshot.state),
+        "records": snapshot.records,
+        "inversion_count": snapshot.inversion_count,
+        "confluence_count": snapshot.confluence_count,
+        "examples": list(snapshot.examples),
+    }
+
+
+def _certificate_block(certificate: "OrderingCertificate | None") -> dict[str, Any] | None:
+    if certificate is None:
+        return None
+    return certificate.to_dict()
+
+
+def _rule_cutover_permission(
+    rule: Any,
+    stats: dict[str, Any],
+    certificate: "OrderingCertificate | None",
+) -> dict[str, Any]:
+    """Decide whether old range boundaries/cursors may be translated directly.
+
+    Snapshot gates (collisions, overlength, other high findings) always apply.
+    The certificate decides the ordering-specific license; an unproven domain
+    never inherits permission merely because the current snapshot looked clean.
+    """
+
+    snapshot_gate_blocked = (
+        stats["collision_groups"] > 0
+        or stats["overlength"] > 0
+        or stats["findings_by_severity"].get("high", 0) > 0
+    )
+
+    if certificate is None:
+        return {
+            "direct_translation_allowed": False,
+            "license": "not_established",
+            "license_label": CERT_LICENSE_LABEL["not_established"],
+            "basis": "no_certificate_declared",
+            "detail": (
+                "未声明可核验的未来原键域；当前快照无倒序不能外推到未来键，"
+                "范围/游标切换须维持旧排序服务或做目标侧全域过滤。"
+            ),
+            "snapshot_gate_blocked": snapshot_gate_blocked,
+            "certificate_status": None,
+        }
+
+    allowed = (
+        certificate.license == "direct_translation"
+        and certificate.status == "proven"
+        and not snapshot_gate_blocked
+    )
+    if certificate.status == "proven" and not snapshot_gate_blocked:
+        detail = (
+            "声明有限域已穷尽证明保序且目标键唯一，碰撞/长度门禁通过，"
+            "可将旧范围边界/seek 游标直译为目标 binary UTF-8 键。"
+        )
+    elif certificate.status == "proven":
+        detail = (
+            "域内已证保序，但当前快照的碰撞/长度/高等级门禁未通过，"
+            "直译暂不生效，须先清除阻断项后复跑。"
+        )
+    elif certificate.status == "counterexample":
+        detail = (
+            "声明域内已重放出倒序或合流反例，直译被证书阻断；"
+            "即使当前快照未观察到问题，也必须维持旧排序或目标侧全域过滤。"
+        )
+    elif certificate.status == "invalid_domain":
+        detail = (
+            "未来键域声明无效或成员全部被门禁排除，无法产生保序结论，直译阻断。"
+        )
+    else:
+        detail = (
+            "域规模超出穷尽限制，仅完成有界反例搜索且未穷尽；"
+            "未找到反例不等于已证保序，直译不予授权。"
+        )
+
+    return {
+        "direct_translation_allowed": allowed,
+        "license": certificate.license,
+        "license_label": CERT_LICENSE_LABEL.get(certificate.license, certificate.license),
+        "basis": "ordering_certificate",
+        "detail": detail,
+        "snapshot_gate_blocked": snapshot_gate_blocked,
+        "certificate_status": certificate.status,
+        "certificate_status_label": CERT_STATUS_LABEL.get(
+            certificate.status, certificate.status
+        ),
+        "certificate_id": certificate.certificate_id,
+    }
+
+
+def _certificate_step_status(result: "ScanResult") -> str:
+    if not result.ordering_certificates:
+        return "pending"
+    if any(c.status in {"counterexample", "invalid_domain"} for c in result.ordering_certificates):
+        return "blocked"
+    if any(c.status == "unknown" for c in result.ordering_certificates):
+        return "review"
+    return "ready"
+
+
+def _certificate_step_detail(result: "ScanResult") -> str:
+    if not result.ordering_certificates:
+        return (
+            "本次没有规则声明可核验的未来原键域；快照双排序只评价已载入记录，"
+            "不能保证未来新增键仍可用旧范围边界或游标直接查询。"
+        )
+    counts = Counter(c.status for c in result.ordering_certificates)
+    return (
+        f"共 {len(result.ordering_certificates)} 条规则声明未来键域："
+        f"已证保序 {counts.get('proven', 0)} 条、"
+        f"反例阻断 {counts.get('counterexample', 0)} 条、"
+        f"未穷尽 unknown {counts.get('unknown', 0)} 条、"
+        f"无效域 {counts.get('invalid_domain', 0)} 条。"
+        "当前快照观察、未来域证书与无证明三类结论分别列示，不合并为单一通过状态。"
+    )

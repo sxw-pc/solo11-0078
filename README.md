@@ -9,9 +9,10 @@
 - 零宽字符、软连字符、双向文本控制符、控制字符等**不可见字符风险**；
 - NBSP、全角空格、制表符、连续空白、首尾空白等**异常空白**；
 - 非法字节序列、`U+FFFD` 替换字符、疑似乱码等**解码风险**；
-- 缺失必需值、空键、复合键分隔符歧义、非文本值强制转写等结构问题。
+- 缺失必需值、空键、复合键分隔符歧义、非文本值强制转写等结构问题；
+- **未来新增键的排序兼容证书**：在调用方显式声明的可核验未来原键域上，证明旧顺序与目标 binary UTF-8 顺序是否保序、唯一身份是否保持，用于范围边界与 seek 游标切换预检（不连接目标数据库）。
 
-输出风险清单、逐键结果、碰撞组、迁移计划、SQLite 审计台账、JSON / Markdown 报告和**自包含只读 HTML 复核页**。
+输出风险清单、逐键结果、碰撞组、未来键域排序兼容证书、迁移计划、SQLite 审计台账、JSON / Markdown 报告和**自包含只读 HTML 复核页**。
 
 工具完全离线，只依赖 Python 3.10+ 标准库。
 
@@ -79,8 +80,9 @@ charorder/
 │   ├── config.py              # 严格配置校验与路径解析
 │   ├── ingest.py              # CSV / JSONL / SQLite 只读读取
 │   ├── transforms.py          # 宽度折叠、Unicode 规范化检测与文本分析
+│   ├── certificates.py        # 未来键域排序兼容证书（穷尽证明 / 有界反例搜索 / 快照观察）
 │   ├── engine.py              # 键计算、碰撞检测、风险汇总
-│   ├── planner.py             # 确定性迁移计划与门禁
+│   ├── planner.py             # 确定性迁移计划、直译许可与门禁
 │   ├── ledger.py              # SQLite 审计台账
 │   ├── report.py              # Markdown + 自包含 HTML
 │   ├── artifacts.py           # 运行编排与原子写入
@@ -231,6 +233,40 @@ charorder/
 
 复合键固定使用 ASCII Unit Separator `U+001F`。若某个变换后的分量本身包含该字符，会生成高等级 `COMPOSITE_SEPARATOR` 风险，避免静默产生歧义键。
 
+### 5.5 未来原键域与排序兼容证书（`future_domain`）
+
+快照双排序只能评价**已载入记录**：若当前快照里只有 `B`，就无法看到 `B` 在 `case=lower` 后变成 `b`、从而在 binary UTF-8 序上反超 `a` 的风险。`future_domain` 让调用方显式声明一个**可核验的未来原键域**，工具据此生成规则级排序兼容证书，用于范围查询与 seek 游标切换前的离线预检，全程不连接目标数据库。
+
+```json
+"future_domain": {
+  "legacy_order": "binary_utf8",
+  "exhaustive_member_limit": 20000,
+  "pair_budget": 200000,
+  "components": [
+    {"column": "v", "charset": ["B", "a"], "min_length": 1, "max_length": 1}
+  ]
+}
+```
+
+- `components`：与规则 `columns` 一一对应、顺序一致；复合键按“逐分量变换、`U+001F` 拼接”的现有规则对**完整字符串/完整复合键**求值，不做逐码位判断。
+- `charset`：该分量允许的字母表条目数组。普通条目是单个码位；也允许放入具体的多码位字符串成员（例如同时声明预组合字符与分解序列）。含孤立代理码位的条目在配置加载阶段即被拒绝，因为目标 binary UTF-8 键无法编码。
+- `min_length` / `max_length`：分量长度上下限；`max_length` 为 `null` 表示无界，域不再是有限集，证书判为 `invalid_domain`。
+- `legacy_order`：旧比较语义，`binary_utf8`（默认）或 `codepoint`。
+- `exhaustive_member_limit` / `pair_budget`：穷尽成员上限与配对检查预算的确定性边界。
+
+证书绑定域摘要（SHA-256）、TransformSpec 摘要、Unicode 版本与目标 binary UTF-8 顺序，三种结论严格区分，绝不合并成一个“通过”：
+
+| 结论 | 含义 | 查询切换许可 |
+|---|---|---|
+| `proven` | 在声明有限域上**穷尽**证明所有不同原键对都保持严格顺序且目标键唯一 | `direct_translation`（仍受碰撞/长度门禁约束） |
+| `counterexample` | 找到可经 `apply_transform` 重放的最小倒序或合流反例（附两个真实原键） | `blocked`，即使当前快照无倒序也阻断直译 |
+| `unknown` | 域超出穷尽限制或预算耗尽，仅完成有界搜索且**未穷尽** | `not_established`：维持旧排序服务或目标侧全域过滤 |
+| `invalid_domain` | 域声明无效、含不可编码码位、无界，或成员被门禁全部排除 | `blocked` |
+
+关键纪律：**未穷尽时只输出 `unknown`，“没找到反例”绝不写成“已证保序”**。无效域、超限键（`over_max_bytes` / `over_max_chars`）、含 `U+001F` 的键、无法编码的键都会被明确排除并记录依据，不参与保序证明。
+
+报告、计划与台账把三类证据分别列示：① **当前快照观察**（`snapshot_order_observations`，仅描述已载入键）、② **未来域证书**（`ordering_certificates` / `certificates.json`）、③ **没有证明**（未声明域或未穷尽）。计划中每条规则的 `cutover_permission` 与证书状态一一对应；`B`/`a` 这类反例在两条路线下都会阻断直译。
+
 ---
 
 ## 6. 输出产物
@@ -245,8 +281,9 @@ charorder/
 | `plan.md` | 迁移计划的人类可读版本 |
 | `findings.json` | 全量风险清单、严重级别和检查码计数 |
 | `collisions.json` | 全量碰撞组及参与者 |
+| `certificates.json` | 未来键域排序兼容证书、反例、预算与直译许可，以及每规则快照排序观察 |
 | `keys.jsonl` | 每条记录 × 每条规则的原始值、目标键、转义值、字节数、哈希、缺陷与碰撞组 ID |
-| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members 及视图） |
+| `ledger.sqlite` | 可查询的审计台账（含 runs / sources / rules / records / key_results / findings / collisions / collision_members / ordering_certificates / snapshot_order_observations 及视图） |
 | `manifest.json` | 运行清单：产物哈希、计划哈希、源指纹、复跑命令 |
 
 默认输出目录为 `charorder-runs/<run-id>/`；显式传入 `--out` 可指定位置。目录非空时默认拒绝写入，需用 `--force` 覆盖已知产物名。工具不会清理目录中的未知文件。
@@ -377,13 +414,15 @@ python tools/build_demo_fixtures.py
 python -m unittest discover -s tests -v
 ```
 
-87 个标准库 `unittest` 用例覆盖：
+122 个标准库 `unittest` 用例覆盖：
 
 - 宽度折叠、NFC/NFD、casefold、不可见字符策略、空白折叠与管线顺序；
 - 不可见 / 双向 / 控制 / 替换 / 代理 / 乱码 / 空白检测；
-- 配置字段、错误路径、重复 ID、未知检查码；
+- 配置字段、错误路径、重复 ID、未知检查码、未来键域声明校验；
 - CSV BOM、非法字节替换与严格模式、JSONL 坏行续跑、SQLite 只读与元数据解码；
 - 大小写 / 全角 / 规范化碰撞、复合键碰撞、重复记录标识、空键、必需值缺失、超限；
+- 未来键域证书：`B`/`a` 倒序但快照仅 `B`、NFC 跨组合字符边界改序、NFD 跨组合边界、宽度折叠倒序与合流、casefold 合流、复合键、完整保序域、预算耗尽 unknown、无效/无界/不可编码域；
+- 反例均经 `apply_transform` / `make_target_key` 重放，直译许可与计划、报告、SQLite 台账一致；
 - 计划确定性、产物哈希、源文件未被修改、SQLite 台账计数与视图；
 - 自包含 HTML、无外部资源、XSS 转义；
 - CLI 退出码、`verify` 篡改检测；
@@ -400,6 +439,7 @@ python -m unittest discover -s tests -v
 - 宽度折叠只处理 East Asian Width `F/H` 片段，不是完整 NFKC；需要更广兼容折叠时显式选择 `NFKC`。
 - 大小写映射基于运行时 Python 的 Unicode 数据，不使用数据库 collation 或系统 locale。运行 ID 包含 Unicode 版本。
 - 碰撞检测按 UTF-8 二进制键精确分组；不提供模糊匹配、编辑距离、拼音或语音近似。
+- 排序兼容证书只对调用方显式声明的有限未来键域负责；未声明域、无界域或未穷尽搜索不会产生保序结论，快照无倒序也不能外推到未来键。
 - 不自动判断哪个碰撞参与者应保留；不会自动合并、删除、修复乱码或改写源数据。
 - SQLite 台账和报告会包含原始值及部分上下文，仅适合在受控本地环境处理合成或已获授权的数据。
 
@@ -415,6 +455,7 @@ python -m unittest discover -s tests -v
 4. 逐组人工仲裁唯一键碰撞；
 5. 处理不可见字符与异常空白；
 6. 在独立影子库生成键并做旧新排序对比；
-7. 用 `--fail-on high` 复跑，门禁通过后再切换。
+7. 核验未来键域排序兼容证书：仅对已穷尽证明保序的规则授权范围/游标直译，反例阻断、未穷尽按 unknown 保守处理；
+8. 用 `--fail-on high` 复跑，门禁通过且直译许可与证书一致后再切换。
 
-工具本身只提供证据，不执行这 7 步中的任何数据库写操作。
+工具本身只提供证据，不执行这 8 步中的任何数据库写操作。

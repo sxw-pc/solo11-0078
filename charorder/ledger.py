@@ -149,6 +149,43 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             record_id TEXT,
             PRIMARY KEY (group_id, key_result_id)
         );
+        CREATE TABLE ordering_certificates (
+            certificate_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            license TEXT NOT NULL,
+            domain_digest TEXT NOT NULL,
+            transform_digest TEXT NOT NULL,
+            unicode_version TEXT NOT NULL,
+            target_order TEXT NOT NULL,
+            legacy_order TEXT NOT NULL,
+            exhaustive INTEGER NOT NULL,
+            domain_member_count INTEGER NOT NULL,
+            eligible_member_count INTEGER NOT NULL,
+            excluded_count INTEGER NOT NULL,
+            excluded_reasons_json TEXT NOT NULL,
+            pairs_checked INTEGER NOT NULL,
+            pair_budget INTEGER NOT NULL,
+            member_budget INTEGER NOT NULL,
+            budget_exhausted INTEGER NOT NULL,
+            counterexample_json TEXT,
+            invalid_reason TEXT,
+            domain_json TEXT NOT NULL,
+            transform_json TEXT NOT NULL,
+            notes_json TEXT NOT NULL
+        );
+        CREATE TABLE snapshot_order_observations (
+            run_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            records INTEGER NOT NULL,
+            inversion_count INTEGER NOT NULL,
+            confluence_count INTEGER NOT NULL,
+            examples_json TEXT NOT NULL,
+            PRIMARY KEY (run_id, rule_id)
+        );
         CREATE INDEX ix_key_results_rule ON key_results (rule_id, target_key);
         CREATE INDEX ix_key_results_source ON key_results (source_id, record_ref);
         CREATE INDEX ix_findings_severity ON findings (severity, code);
@@ -156,6 +193,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX ix_findings_rule ON findings (rule_id);
         CREATE INDEX ix_collisions_rule ON collisions (rule_id);
         CREATE INDEX ix_collision_members_record ON collision_members (record_ref);
+        CREATE INDEX ix_ordering_cert_rule ON ordering_certificates (rule_id, status);
         CREATE VIEW finding_counts AS
             SELECT code, severity, COUNT(*) AS finding_count
             FROM findings
@@ -167,6 +205,11 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             FROM collisions
             GROUP BY rule_id, source_id, reason_code
             ORDER BY rule_id;
+        CREATE VIEW ordering_certificate_summary AS
+            SELECT status, license, COUNT(*) AS certificate_count
+            FROM ordering_certificates
+            GROUP BY status, license
+            ORDER BY status;
         """
     )
 
@@ -387,6 +430,70 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             )
             for group in result.collisions
             for participant in group.participants
+        ],
+    )
+
+    connection.executemany(
+        """
+        INSERT INTO ordering_certificates (
+            certificate_id, run_id, rule_id, source_id, status, license,
+            domain_digest, transform_digest, unicode_version, target_order,
+            legacy_order, exhaustive, domain_member_count, eligible_member_count,
+            excluded_count, excluded_reasons_json, pairs_checked, pair_budget,
+            member_budget, budget_exhausted, counterexample_json, invalid_reason,
+            domain_json, transform_json, notes_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                certificate.certificate_id,
+                result.run_id,
+                certificate.rule_id,
+                certificate.source_id,
+                certificate.status,
+                certificate.license,
+                certificate.domain_digest,
+                certificate.transform_digest,
+                certificate.unicode_version,
+                certificate.target_order,
+                certificate.domain.legacy_order,
+                int(certificate.exhaustive),
+                certificate.domain_member_count,
+                certificate.eligible_member_count,
+                certificate.excluded_count,
+                _json(certificate.excluded_reasons),
+                certificate.pairs_checked,
+                certificate.pair_budget,
+                certificate.member_budget,
+                int(certificate.budget_exhausted),
+                _json(certificate.counterexample) if certificate.counterexample else None,
+                certificate.invalid_reason,
+                _json(certificate.domain.as_dict()),
+                _json(certificate.transform.as_dict()),
+                _json(list(certificate.notes)),
+            )
+            for certificate in result.ordering_certificates
+        ],
+    )
+
+    connection.executemany(
+        """
+        INSERT INTO snapshot_order_observations (
+            run_id, rule_id, state, records, inversion_count,
+            confluence_count, examples_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                result.run_id,
+                observation.rule_id,
+                observation.state,
+                observation.records,
+                observation.inversion_count,
+                observation.confluence_count,
+                _json(list(observation.examples)),
+            )
+            for observation in result.snapshot_observations
         ],
     )
 

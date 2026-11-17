@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from . import APP_SLUG, UNICODE_VERSION, __version__
+from .certificates import evaluate_rule, observe_snapshot
 from .models import (
     AppConfig,
     CollisionGroup,
@@ -16,9 +17,11 @@ from .models import (
     Finding,
     KeyResult,
     KeyRule,
+    OrderingCertificate,
     ScanResult,
     SEVERITIES,
     SEVERITY_RANK,
+    SnapshotOrderObservation,
     SourceLoad,
     SourceRecord,
 )
@@ -289,6 +292,41 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
         collisions,
     )
     verdict = _verdict(summary)
+
+    # Future-key ordering evidence is computed separately from snapshot
+    # observations so reports never collapse the two into one pass state.
+    ordering_certificates: list[OrderingCertificate] = []
+    snapshot_observations: list[SnapshotOrderObservation] = []
+    for rule in config.keys:
+        snapshot_observations.append(observe_snapshot(rule, key_results))
+        certificate = evaluate_rule(rule)
+        if certificate is not None:
+            ordering_certificates.append(certificate)
+
+    summary["ordering_certificates"] = {
+        "declared": len(ordering_certificates),
+        "proven": sum(1 for c in ordering_certificates if c.status == "proven"),
+        "counterexample": sum(
+            1 for c in ordering_certificates if c.status == "counterexample"
+        ),
+        "unknown": sum(1 for c in ordering_certificates if c.status == "unknown"),
+        "invalid_domain": sum(
+            1 for c in ordering_certificates if c.status == "invalid_domain"
+        ),
+        "direct_translation_licenses": sum(
+            1 for c in ordering_certificates if c.license == "direct_translation"
+        ),
+    }
+    summary["snapshot_order_observations"] = {
+        state: sum(1 for o in snapshot_observations if o.state == state)
+        for state in (
+            "no_inversion_observed",
+            "inversion_observed",
+            "confluence_observed",
+            "no_records",
+        )
+    }
+
     result = ScanResult(
         config=config,
         run_id=run_id,
@@ -301,6 +339,8 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
         summary=summary,
         verdict=verdict,
         plan={},
+        ordering_certificates=ordering_certificates,
+        snapshot_observations=snapshot_observations,
     )
     result.plan = build_plan(result)
     return result

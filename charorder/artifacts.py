@@ -24,6 +24,7 @@ ARTIFACT_FILES = (
     "plan.md",
     "findings.json",
     "collisions.json",
+    "certificates.json",
     "keys.jsonl",
     "ledger.sqlite",
     "manifest.json",
@@ -76,12 +77,28 @@ def write_artifacts(
         },
         "collisions": [group.to_dict() for group in result.collisions],
     }
+    certificates_doc = {
+        "schema_version": 1,
+        "kind": "charorder.ordering_certificates",
+        "run_id": result.run_id,
+        "target_order": "binary_utf8",
+        "unicode_version": result.summary["unicode_version"],
+        "counts": result.summary["ordering_certificates"],
+        "snapshot_order_observations": [
+            observation.to_dict() for observation in result.snapshot_observations
+        ],
+        "certificates": [
+            certificate.to_dict() for certificate in result.ordering_certificates
+        ],
+        "cutover_permissions": result.plan["cutover_permissions"],
+    }
 
     artifacts: dict[str, bytes] = {
         "plan.json": plan_bytes,
         "plan.md": render_plan_markdown(result).encode("utf-8"),
         "findings.json": _json_bytes(findings_doc),
         "collisions.json": _json_bytes(collisions_doc),
+        "certificates.json": _json_bytes(certificates_doc),
         "keys.jsonl": _jsonl_bytes(item.to_dict() for item in result.key_results),
         "report.md": render_markdown(result).encode("utf-8"),
         "report.html": render_html(result).encode("utf-8"),

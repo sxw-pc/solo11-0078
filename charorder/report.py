@@ -9,9 +9,12 @@ from typing import Any
 
 from . import APP_NAME, APP_SLUG, APP_TAGLINE, UNICODE_VERSION, __version__
 from .models import (
+    CERT_LICENSE_LABEL,
+    CERT_STATUS_LABEL,
     CHECK_LABELS,
     SEVERITIES,
     SEVERITY_LABEL,
+    SNAPSHOT_ORDER_LABEL,
     VERDICT_LABEL,
     ScanResult,
 )
@@ -68,6 +71,224 @@ def _status_badge(status: str) -> str:
         f'<span class="status status-{_e(status)}">'
         f"{_e(_STATUS_LABEL.get(status, status))}</span>"
     )
+
+
+def _render_certificates_markdown(result: ScanResult) -> list[str]:
+    lines: list[str] = [
+        "> 三类证据分别列示，不合并为单一通过状态：",
+        "> ① 当前快照观察（仅评价已载入记录）；",
+        "> ② 未来域证书（对声明的未来原键域穷尽或有界搜索）；",
+        "> ③ 没有证明（未声明域或未穷尽，不能当作保序）。",
+        "",
+        "### 当前快照观察",
+        "",
+        "| 规则 | 快照状态 | 记录数 | 倒序对数 | 合流对数 |",
+        "|---|---|---:|---:|---:|",
+    ]
+    for observation in result.snapshot_observations:
+        lines.append(
+            f"| {_md(observation.rule_id)} | "
+            f"{_md(SNAPSHOT_ORDER_LABEL.get(observation.state, observation.state))} | "
+            f"{observation.records} | {observation.inversion_count} | "
+            f"{observation.confluence_count} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "### 未来域证书与直译许可",
+            "",
+        ]
+    )
+    if not result.ordering_certificates:
+        lines.append(
+            "没有规则声明可核验的未来原键域。快照无倒序不构成未来键保序证明，"
+            "范围边界/seek 游标切换一律按“没有证明”保守处理。"
+        )
+        return lines
+
+    lines.append(
+        "| 规则 | 证书结论 | 直译许可 | 穷尽 | 域成员 | 可证成员 | 检查键对 | 预算耗尽 | 证书 ID |"
+    )
+    lines.append("|---|---|---|---|---:|---:|---:|---|---|")
+    for certificate in result.ordering_certificates:
+        lines.append(
+            f"| {_md(certificate.rule_id)} | "
+            f"{_md(CERT_STATUS_LABEL.get(certificate.status, certificate.status))} | "
+            f"{_md(CERT_LICENSE_LABEL.get(certificate.license, certificate.license))} | "
+            f"{'是' if certificate.exhaustive else '否'} | "
+            f"{certificate.domain_member_count} | {certificate.eligible_member_count} | "
+            f"{certificate.pairs_checked} | "
+            f"{'是' if certificate.budget_exhausted else '否'} | "
+            f"{_md(certificate.certificate_id)} |"
+        )
+
+    for certificate in result.ordering_certificates:
+        lines.extend(["", f"#### 规则 `{certificate.rule_id}` · {certificate.certificate_id}", ""])
+        lines.append(
+            f"- 域摘要 SHA-256：`{certificate.domain_digest}` · "
+            f"TransformSpec 摘要：`{certificate.transform_digest}`"
+        )
+        lines.append(
+            f"- Unicode：`{certificate.unicode_version}` · "
+            f"目标顺序：`{certificate.target_order}` · 旧语义：`{certificate.domain.legacy_order}`"
+        )
+        lines.append(f"- 说明：{_md(' '.join(certificate.notes))}")
+        if certificate.invalid_reason:
+            lines.append(f"- 无效依据：{_md(certificate.invalid_reason)}")
+        if certificate.excluded_count:
+            lines.append(
+                f"- 排除成员：{certificate.excluded_count} 个，依据："
+                f"{_md(json.dumps(certificate.excluded_reasons, ensure_ascii=False, sort_keys=True))}"
+            )
+        if certificate.counterexample:
+            ce = certificate.counterexample
+            lines.append(f"- **反例类型：`{ce['kind']}`** — {_md(ce['detail'])}")
+            lines.append(
+                f"    - 原键 A：{_md_code(ce['raw_a']['raw_key_escaped'])} → "
+                f"目标 A：{_md_code(ce['target_a_escaped'])}"
+            )
+            lines.append(
+                f"    - 原键 B：{_md_code(ce['raw_b']['raw_key_escaped'])} → "
+                f"目标 B：{_md_code(ce['target_b_escaped'])}"
+            )
+            lines.append(
+                f"    - 旧比较：`{ce['legacy_comparison']}` · "
+                f"目标比较：`{ce['target_comparison']}` · "
+                f"apply_transform 重放一致：`{ce['replay_matches_pipeline']}`"
+            )
+
+        plan_rule = next(
+            item for item in result.plan["rules"] if item["rule_id"] == certificate.rule_id
+        )
+        cutover = plan_rule["cutover_permission"]
+        lines.append(
+            f"- 计划直译开关：**{'允许' if cutover['direct_translation_allowed'] else '不允许'}**"
+            f"（{_md(cutover['detail'])}）"
+        )
+    return lines
+
+
+def _render_certificates_html(
+    result: ScanResult,
+    snapshot_by_rule: dict[str, Any],
+    cert_by_rule: dict[str, Any],
+) -> str:
+    snapshot_rows = []
+    for rule in result.config.keys:
+        observation = snapshot_by_rule.get(rule.id)
+        state = observation.state if observation else "no_records"
+        records = observation.records if observation else 0
+        snapshot_rows.append(
+            f"""
+          <tr>
+            <td class="mono strong">{_e(rule.id)}</td>
+            <td>{_e(SNAPSHOT_ORDER_LABEL.get(state, state))}</td>
+            <td class="num">{records}</td>
+            <td class="num">{observation.inversion_count if observation else 0}</td>
+            <td class="num">{observation.confluence_count if observation else 0}</td>
+          </tr>"""
+        )
+
+    cards: list[str] = [
+        f"""
+      <article class="panel">
+        <h3>① 当前快照观察（仅已载入记录）</h3>
+        <p class="note">单条记录或无倒序的快照不能证明未来新增键安全；这只描述当前看到的键。</p>
+        <div class="table-scroll compact">
+          <table>
+            <thead><tr><th>规则</th><th>快照状态</th><th>记录</th><th>倒序对</th><th>合流对</th></tr></thead>
+            <tbody>{''.join(snapshot_rows)}</tbody>
+          </table>
+        </div>
+      </article>"""
+    ]
+
+    if not result.ordering_certificates:
+        cards.append(
+            """
+      <article class="panel">
+        <h3>② 未来域证书</h3>
+        <div class="empty-state"><strong>未声明可核验的未来原键域</strong>
+        <span>③ 没有证明：范围边界/seek 游标切换按保守路线处理，不授予直译许可。</span></div>
+      </article>"""
+        )
+        return f'<div class="collisions">{"".join(cards)}</div>'
+
+    cert_cards = []
+    for rule in result.config.keys:
+        certificate = cert_by_rule.get(rule.id)
+        if certificate is None:
+            continue
+        plan_rule = next(
+            item for item in result.plan["rules"] if item["rule_id"] == rule.id
+        )
+        cutover = plan_rule["cutover_permission"]
+        ce_html = ""
+        if certificate.counterexample:
+            ce = certificate.counterexample
+            ce_html = f"""
+            <div class="collision-key">
+              <span class="tiny-label">反例 · {_e(ce['kind'])}</span>
+              <code>{_e(ce['detail'])}</code>
+              <p class="small muted">原键 A {_e(ce['raw_a']['raw_key_escaped'])} → 目标 A {_e(ce['target_a_escaped'])}<br>
+              原键 B {_e(ce['raw_b']['raw_key_escaped'])} → 目标 B {_e(ce['target_b_escaped'])}<br>
+              旧比较 {_e(ce['legacy_comparison'])} · 目标比较 {_e(ce['target_comparison'])} ·
+              apply_transform 重放一致 {_e(ce['replay_matches_pipeline'])}</p>
+            </div>"""
+        excluded = ""
+        if certificate.excluded_count:
+            excluded = (
+                '<p class="note">排除成员 '
+                f'{certificate.excluded_count} 个：{_e(json.dumps(certificate.excluded_reasons, ensure_ascii=False, sort_keys=True))}</p>'
+            )
+        invalid = (
+            f'<p class="note"><strong>无效依据：</strong>{_e(certificate.invalid_reason)}</p>'
+            if certificate.invalid_reason
+            else ""
+        )
+        cert_cards.append(
+            f"""
+        <article class="collision-card">
+          <header>
+            <div>
+              <div class="eyebrow small">{_e(certificate.certificate_id)}</div>
+              <h3><span class="mono">{_e(certificate.rule_id)}</span></h3>
+            </div>
+            <span class="count-chip">{_e(CERT_STATUS_LABEL.get(certificate.status, certificate.status))}</span>
+          </header>
+          <p class="small muted">域摘要 <code>{_e(certificate.domain_digest[:16])}…</code> ·
+          变换摘要 <code>{_e(certificate.transform_digest[:16])}…</code> ·
+          Unicode {_e(certificate.unicode_version)} · 目标 {_e(certificate.target_order)} ·
+          旧语义 {_e(certificate.domain.legacy_order)}</p>
+          <div class="table-scroll compact">
+            <table>
+              <tbody>
+                <tr><th>穷尽证明</th><td>{'是' if certificate.exhaustive else '否'}</td></tr>
+                <tr><th>域成员 / 可证成员</th><td>{certificate.domain_member_count} / {certificate.eligible_member_count}</td></tr>
+                <tr><th>已检查不同原键对</th><td>{certificate.pairs_checked}（预算 {certificate.pair_budget}）</td></tr>
+                <tr><th>预算耗尽</th><td>{'是 → unknown，未穷尽不伪证明' if certificate.budget_exhausted else '否'}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          {invalid}
+          {excluded}
+          {ce_html}
+          <p class="small">{_e(' '.join(certificate.notes))}</p>
+          <div class="collision-key">
+            <span class="tiny-label">计划直译开关</span>
+            <code>{'允许直译' if cutover['direct_translation_allowed'] else '不允许直译'}</code>
+            <p class="small muted">{_e(cutover['detail'])}</p>
+          </div>
+        </article>"""
+        )
+    cards.append(
+        '<article class="panel"><h3>② 未来域证书与查询切换许可</h3>'
+        '<p class="note">证书绑定域摘要、TransformSpec、Unicode 版本与目标 binary UTF-8 顺序；'
+        "反例均经 apply_transform 重放。</p>"
+        f'<div class="collisions">{"".join(cert_cards)}</div></article>'
+    )
+    return f'<div class="collisions">{"".join(cards)}</div>'
 
 
 def render_markdown(result: ScanResult) -> str:
@@ -194,6 +415,9 @@ def render_markdown(result: ScanResult) -> str:
                 f"另有 {omitted} 项见 `findings.json` 与台账。"
             )
 
+    lines.extend(["", "## 未来键域排序兼容证书", ""])
+    lines.extend(_render_certificates_markdown(result))
+
     lines.extend(["", "## 迁移计划", ""])
     for step in plan["steps"]:
         lines.append(
@@ -275,6 +499,31 @@ def render_plan_markdown(result: ScanResult) -> str:
             f"{rule['records']} | {rule['changed_keys']} | "
             f"{rule['collision_groups']} | {rule['overlength']} | "
             f"{_md(', '.join(rule['blocking_codes']) or '—')} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 范围/游标切换许可（与未来域证书一致）",
+            "",
+            "| 规则 | 快照观察 | 证书结论 | 直译许可 | 直译开关 |",
+            "|---|---|---|---|---|",
+        ]
+    )
+    for rule in plan["rules"]:
+        snapshot = rule["snapshot_order"]
+        certificate = rule["ordering_certificate"]
+        cert_status = (
+            CERT_STATUS_LABEL.get(certificate["status"], certificate["status"])
+            if certificate
+            else "未声明（没有证明）"
+        )
+        cutover = rule["cutover_permission"]
+        lines.append(
+            f"| {_md(rule['rule_id'])} | "
+            f"{_md(SNAPSHOT_ORDER_LABEL.get(snapshot['state'], snapshot['state']))} | "
+            f"{_md(cert_status)} | "
+            f"{_md(CERT_LICENSE_LABEL.get(cutover['license'], cutover['license']))} | "
+            f"{'允许' if cutover['direct_translation_allowed'] else '不允许'} |"
         )
     lines.extend(["", "## 执行步骤", ""])
     for step in plan["steps"]:
@@ -522,6 +771,15 @@ def render_html(result: ScanResult) -> str:
 
     config = result.config
     high_findings = sev.get("high", 0)
+    snapshot_by_rule = {
+        observation.rule_id: observation
+        for observation in result.snapshot_observations
+    }
+    cert_by_rule = {
+        certificate.rule_id: certificate
+        for certificate in result.ordering_certificates
+    }
+    cert_panels = _render_certificates_html(result, snapshot_by_rule, cert_by_rule)
     verdict_detail = {
         "blocked": "存在高等级发现。请先完成源数据或规则处置，再创建目标唯一索引。",
         "review": "没有高等级发现，但仍有需要业务确认的中等级问题。",
@@ -859,6 +1117,11 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
       <div class="no-match" id="no-match">当前筛选没有匹配的风险项。</div>
       {f'<p class="note">页面仅展示前 {max_rows:,} 项，另有 {omitted_findings:,} 项见 findings.json 与台账；筛选仅作用于当前页面。</p>' if omitted_findings > 0 else ''}
     </div>
+  </section>
+
+  <section class="section" id="ordering-certificates">
+    <div class="section-head"><h2>未来键域排序兼容证书</h2><p>当前快照观察 · 未来域证书 · 没有证明，三类分列</p></div>
+    {''.join(cert_panels)}
   </section>
 
   <section class="section" id="plan">

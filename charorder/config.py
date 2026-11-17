@@ -15,6 +15,8 @@ from .models import (
     DEFAULT_SEVERITIES,
     SEVERITIES,
     AppConfig,
+    DomainComponent,
+    FutureDomainSpec,
     KeyRule,
     ProjectSpec,
     SourceSpec,
@@ -47,6 +49,7 @@ _KEY_FIELDS = {
     "required",
     "max_bytes",
     "max_chars",
+    "future_domain",
 }
 _TRANSFORM_FIELDS = {
     "normalization",
@@ -56,7 +59,20 @@ _TRANSFORM_FIELDS = {
     "collapse_whitespace",
     "invisible",
 }
+_FUTURE_DOMAIN_FIELDS = {
+    "components",
+    "legacy_order",
+    "exhaustive_member_limit",
+    "pair_budget",
+}
+_DOMAIN_COMPONENT_FIELDS = {"column", "charset", "min_length", "max_length"}
 _REPORT_FIELDS = {"max_report_rows"}
+
+DEFAULT_EXHAUSTIVE_MEMBER_LIMIT = 20_000
+DEFAULT_PAIR_BUDGET = 200_000
+_MAX_EXHAUSTIVE_MEMBER_LIMIT = 1_000_000
+_MAX_PAIR_BUDGET = 100_000_000
+_LEGACY_ORDERS = {"binary_utf8", "codepoint"}
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -275,6 +291,10 @@ def _parse_key(item: Any, index: int) -> KeyRule:
     max_bytes = _optional_positive_int(obj.get("max_bytes"), f"{where}.max_bytes")
     max_chars = _optional_positive_int(obj.get("max_chars"), f"{where}.max_chars")
 
+    future_domain = _parse_future_domain(
+        obj.get("future_domain"), f"{where}.future_domain", columns
+    )
+
     return KeyRule(
         id=key_id,
         label=label,
@@ -287,7 +307,131 @@ def _parse_key(item: Any, index: int) -> KeyRule:
         required=required,
         max_bytes=max_bytes,
         max_chars=max_chars,
+        future_domain=future_domain,
     )
+
+
+def _parse_future_domain(
+    item: Any, where: str, columns: list[str]
+) -> FutureDomainSpec | None:
+    if item is None:
+        return None
+    obj = _require_object(item, where)
+    _reject_unknown(obj, _FUTURE_DOMAIN_FIELDS, where)
+
+    legacy_order = _optional_str(obj.get("legacy_order", "binary_utf8"), f"{where}.legacy_order")
+    if legacy_order not in _LEGACY_ORDERS:
+        raise ConfigError(
+            f"{where}.legacy_order 必须是 {' / '.join(sorted(_LEGACY_ORDERS))}。"
+        )
+
+    exhaustive_member_limit = _bounded_positive_int(
+        obj.get("exhaustive_member_limit", DEFAULT_EXHAUSTIVE_MEMBER_LIMIT),
+        f"{where}.exhaustive_member_limit",
+        _MAX_EXHAUSTIVE_MEMBER_LIMIT,
+    )
+    pair_budget = _bounded_positive_int(
+        obj.get("pair_budget", DEFAULT_PAIR_BUDGET),
+        f"{where}.pair_budget",
+        _MAX_PAIR_BUDGET,
+    )
+
+    components_obj = obj.get("components")
+    if not isinstance(components_obj, list) or not components_obj:
+        raise ConfigError(f"{where}.components 必须是非空数组。")
+    if len(components_obj) != len(columns):
+        raise ConfigError(
+            f"{where}.components 分量数（{len(components_obj)}）"
+            f"必须与 columns 分量数（{len(columns)}）一致，复合键按逐分量域求值。"
+        )
+
+    components: list[DomainComponent] = []
+    seen_columns: set[str] = set()
+    for index, comp_obj in enumerate(components_obj):
+        comp_where = f"{where}.components[{index}]"
+        comp = _require_object(comp_obj, comp_where)
+        _reject_unknown(comp, _DOMAIN_COMPONENT_FIELDS, comp_where)
+        column = _require_nonempty_str(comp.get("column"), f"{comp_where}.column")
+        if column not in columns:
+            raise ConfigError(
+                f"{comp_where}.column 必须是该规则 columns 中声明的列：{column}"
+            )
+        if column in seen_columns:
+            raise ConfigError(f"{comp_where}.column 重复：{column}")
+        seen_columns.add(column)
+
+        charset_obj = comp.get("charset")
+        if not isinstance(charset_obj, list) or not charset_obj:
+            raise ConfigError(f"{comp_where}.charset 必须是非空字符串数组。")
+        charset: list[str] = []
+        seen_chars: set[str] = set()
+        for char_index, raw_char in enumerate(charset_obj):
+            # Each entry is an explicit alphabet token: either one code point
+            # (the normal case) or a concrete multi-code-point string member.
+            if not isinstance(raw_char, str) or not raw_char:
+                raise ConfigError(
+                    f"{comp_where}.charset[{char_index}] 必须是非空字符串。"
+                )
+            for ch in raw_char:
+                codepoint = ord(ch)
+                if 0xD800 <= codepoint < 0xE000:
+                    raise ConfigError(
+                        f"{comp_where}.charset[{char_index}] 含孤立代理码位 "
+                        f"U+{codepoint:04X}，无法编码为目标 binary UTF-8 键，必须排除。"
+                    )
+            if raw_char in seen_chars:
+                raise ConfigError(
+                    f"{comp_where}.charset 含重复条目：{raw_char!r}。"
+                )
+            seen_chars.add(raw_char)
+            charset.append(raw_char)
+
+        min_length = comp.get("min_length", 0)
+        max_length = comp.get("max_length")
+        if isinstance(min_length, bool) or not isinstance(min_length, int) or min_length < 0:
+            raise ConfigError(f"{comp_where}.min_length 必须是 >= 0 的整数。")
+        if (
+            max_length is not None
+            and (
+                isinstance(max_length, bool)
+                or not isinstance(max_length, int)
+                or max_length <= 0
+            )
+        ):
+            raise ConfigError(f"{comp_where}.max_length 必须是正整数或 null。")
+        if max_length is not None and min_length > max_length:
+            raise ConfigError(
+                f"{comp_where}.min_length 不能大于 max_length。"
+            )
+        components.append(
+            DomainComponent(
+                column=column,
+                charset=tuple(charset),
+                min_length=min_length,
+                max_length=max_length if max_length is not None else max_length,
+            )
+        )
+
+    if [component.column for component in components] != columns:
+        raise ConfigError(
+            f"{where}.components 的列顺序必须与 columns 完全一致，"
+            "复合键按声明顺序逐分量变换并以 U+001F 拼接。"
+        )
+
+    return FutureDomainSpec(
+        components=tuple(components),
+        legacy_order=legacy_order,
+        exhaustive_member_limit=exhaustive_member_limit,
+        pair_budget=pair_budget,
+    )
+
+
+def _bounded_positive_int(value: Any, where: str, upper: int) -> int:
+    if value is None or isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"{where} 必须是正整数。")
+    if value > upper:
+        raise ConfigError(f"{where} 不能超过 {upper}，请收窄声明域而不是放大预算。")
+    return value
 
 
 def _parse_transform(item: Any, where: str) -> TransformSpec:

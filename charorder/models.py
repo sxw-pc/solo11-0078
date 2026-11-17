@@ -65,6 +65,42 @@ VERDICT_LABEL = {
     "pass": "通过：未发现风险",
 }
 
+# Future-key ordering certificate verdicts and cutover licenses.
+CERT_STATUSES = (
+    "proven",            # exhaustive proof over the full declared finite domain
+    "counterexample",    # a real replayable inversion/confluence pair was found
+    "unknown",           # bounded search exhausted its budget without a proof
+    "invalid_domain",    # the declared domain itself is not verifiable
+)
+CERT_LICENSES = (
+    "direct_translation",  # old boundaries/cursors may be mapped directly
+    "blocked",             # direct translation must not be licensed
+    "not_established",     # keep legacy ordering or target-side full-domain filtering
+)
+SNAPSHOT_ORDER_STATES = (
+    "no_inversion_observed",
+    "inversion_observed",
+    "confluence_observed",
+    "no_records",
+)
+CERT_STATUS_LABEL = {
+    "proven": "已证保序（域内穷尽）",
+    "counterexample": "已发现倒序/合流反例",
+    "unknown": "未穷尽：无证明",
+    "invalid_domain": "域声明无效：无法证明",
+}
+CERT_LICENSE_LABEL = {
+    "direct_translation": "允许直译旧范围边界/游标",
+    "blocked": "阻断直译",
+    "not_established": "待核实：维持旧排序或目标侧全域过滤",
+}
+SNAPSHOT_ORDER_LABEL = {
+    "no_inversion_observed": "当前快照未观察到倒序",
+    "inversion_observed": "当前快照已观察到倒序",
+    "confluence_observed": "当前快照已观察到合流",
+    "no_records": "快照无记录",
+}
+
 
 @dataclass(frozen=True)
 class ProjectSpec:
@@ -124,6 +160,42 @@ class TransformSpec:
 
 
 @dataclass(frozen=True)
+class DomainComponent:
+    """One composite-key component's declared future raw-key domain."""
+
+    column: str
+    charset: tuple[str, ...]
+    min_length: int
+    max_length: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "column": self.column,
+            "charset": list(self.charset),
+            "min_length": self.min_length,
+            "max_length": self.max_length,
+        }
+
+
+@dataclass(frozen=True)
+class FutureDomainSpec:
+    """Caller-declared, verifiable domain of future raw keys for one rule."""
+
+    components: tuple[DomainComponent, ...]
+    legacy_order: str
+    exhaustive_member_limit: int
+    pair_budget: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "components": [component.as_dict() for component in self.components],
+            "legacy_order": self.legacy_order,
+            "exhaustive_member_limit": self.exhaustive_member_limit,
+            "pair_budget": self.pair_budget,
+        }
+
+
+@dataclass(frozen=True)
 class KeyRule:
     id: str
     label: str
@@ -136,6 +208,7 @@ class KeyRule:
     required: bool = True
     max_bytes: int | None = None
     max_chars: int | None = None
+    future_domain: FutureDomainSpec | None = None
 
     @property
     def composite(self) -> bool:
@@ -303,6 +376,94 @@ class CollisionGroup:
         }
 
 
+@dataclass(frozen=True)
+class SnapshotOrderObservation:
+    """Ordering evidence derived only from the loaded snapshot's keys."""
+
+    rule_id: str
+    state: str
+    records: int
+    inversion_count: int
+    confluence_count: int
+    examples: tuple[dict[str, Any], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rule_id": self.rule_id,
+            "state": self.state,
+            "records": self.records,
+            "inversion_count": self.inversion_count,
+            "confluence_count": self.confluence_count,
+            "examples": list(self.examples),
+        }
+
+
+@dataclass(frozen=True)
+class OrderingCertificate:
+    """Rule-level certificate for future-key ordering compatibility.
+
+    The certificate never connects to a target database: every target key is
+    replayed through the same ``apply_transform`` pipeline used for snapshot
+    keys, and ordering is evaluated on whole strings / full composite keys.
+    """
+
+    certificate_id: str
+    rule_id: str
+    source_id: str
+    status: str
+    license: str
+    domain: FutureDomainSpec
+    domain_digest: str
+    transform_digest: str
+    transform: TransformSpec
+    unicode_version: str
+    target_order: str
+    exhaustive: bool
+    domain_member_count: int
+    eligible_member_count: int
+    excluded_count: int
+    excluded_reasons: dict[str, int]
+    excluded_examples: tuple[dict[str, Any], ...]
+    pairs_checked: int
+    pair_budget: int
+    member_budget: int
+    budget_exhausted: bool
+    counterexample: dict[str, Any] | None
+    invalid_reason: str | None
+    notes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "certificate_id": self.certificate_id,
+            "rule_id": self.rule_id,
+            "source_id": self.source_id,
+            "status": self.status,
+            "status_label": CERT_STATUS_LABEL.get(self.status, self.status),
+            "license": self.license,
+            "license_label": CERT_LICENSE_LABEL.get(self.license, self.license),
+            "target_order": self.target_order,
+            "legacy_order": self.domain.legacy_order,
+            "unicode_version": self.unicode_version,
+            "domain_digest": self.domain_digest,
+            "transform_digest": self.transform_digest,
+            "domain": self.domain.as_dict(),
+            "transform": self.transform.as_dict(),
+            "exhaustive": self.exhaustive,
+            "domain_member_count": self.domain_member_count,
+            "eligible_member_count": self.eligible_member_count,
+            "excluded_count": self.excluded_count,
+            "excluded_reasons": dict(sorted(self.excluded_reasons.items())),
+            "excluded_examples": list(self.excluded_examples),
+            "pairs_checked": self.pairs_checked,
+            "pair_budget": self.pair_budget,
+            "member_budget": self.member_budget,
+            "budget_exhausted": self.budget_exhausted,
+            "counterexample": self.counterexample,
+            "invalid_reason": self.invalid_reason,
+            "notes": list(self.notes),
+        }
+
+
 @dataclass
 class ScanResult:
     config: AppConfig
@@ -316,3 +477,5 @@ class ScanResult:
     summary: dict[str, Any]
     verdict: str
     plan: dict[str, Any]
+    ordering_certificates: list[OrderingCertificate] = field(default_factory=list)
+    snapshot_observations: list[SnapshotOrderObservation] = field(default_factory=list)
