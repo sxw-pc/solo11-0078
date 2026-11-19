@@ -23,7 +23,40 @@ _STATUS_LABEL = {
     "pending": "待执行",
     "done": "已完成",
     "no_records": "无记录",
+    "uncertain": "不确定",
 }
+
+_TAINT_SCOPE_LABEL = {
+    "field": "字段级",
+    "record": "整行记录",
+    "source": "整个源",
+}
+
+
+def _taint_provenance(result: ScanResult) -> list[dict[str, Any]]:
+    """Per-source decoder-replacement provenance for review pages."""
+
+    rows: list[dict[str, Any]] = []
+    for load in result.source_loads:
+        note = load.decode_note or {}
+        taint = note.get("taint")
+        if not taint:
+            continue
+        rows.append(
+            {
+                "source_id": load.spec.id,
+                "encoding": note.get("encoding", load.spec.encoding),
+                "replacement_chars": taint.get("replacement_chars", 0),
+                "scope": taint.get("scope", "source"),
+                "reason": taint.get("reason") or "",
+                "affected_records": taint.get("affected_records", 0),
+                "affected_columns": taint.get("affected_columns") or [],
+                "byte_spans": taint.get("byte_spans") or [],
+                "byte_spans_total": taint.get("byte_spans_total", 0),
+                "tracking": taint.get("tracking", "precise"),
+            }
+        )
+    return rows
 
 
 def _e(value: Any) -> str:
@@ -94,6 +127,8 @@ def render_markdown(result: ScanResult) -> str:
         f"- 高 / 中 / 低风险：**{sev.get('high', 0)} / {sev.get('medium', 0)} / {sev.get('low', 0)}**",
         f"- 归一化唯一键碰撞组：**{summary['collision_groups']}**，"
         f"涉及 **{summary['collision_records']}** 条记录",
+        f"- 不确定键（替换解码污染）：**{summary.get('uncertain_keys', 0)}** 个 · "
+        f"不确定碰撞组：**{summary.get('uncertain_collision_groups', 0)}**（禁止据此仲裁）",
         f"- 超限键：**{summary['overlength_keys']}** · 变换后键值变化：**{summary['changed_keys']}**",
         "",
         "## 源文件指纹",
@@ -113,8 +148,8 @@ def render_markdown(result: ScanResult) -> str:
             "",
             "## 目标键规则",
             "",
-            "| 规则 | 源 / 列 | 目标 | 变换 | 唯一 | 记录 | 碰撞组 | 超限 | 状态 |",
-            "|---|---|---|---|---|---:|---:|---:|---|",
+            "| 规则 | 源 / 列 | 目标 | 变换 | 唯一 | 记录 | 不确定键 | 碰撞组 | 超限 | 状态 |",
+            "|---|---|---|---|---|---:|---:|---:|---:|---|",
         ]
     )
     plan_rules = {rule["rule_id"]: rule for rule in plan["rules"]}
@@ -126,15 +161,23 @@ def render_markdown(result: ScanResult) -> str:
             f"| {_md(rule.id)} | {_md(rule.source_id)} / {_md_code(columns)} | "
             f"{_md_code(rule.destination or '—')} | {_md(rule.transform.describe())} | "
             f"{'是' if rule.unique else '否'} | {stats['records']} | "
+            f"{stats.get('uncertain_keys', 0)} | "
             f"{stats['collision_groups']} | {stats['overlength']} | "
             f"{_md(_STATUS_LABEL.get(plan_rule['status'], plan_rule['status']))} |"
         )
 
-    lines.extend(["", "## 唯一键碰撞组", ""])
-    if not result.collisions:
-        lines.append("未发现唯一键碰撞组。")
+    certain_collisions = [
+        group for group in result.collisions if group.confidence == "certain"
+    ]
+    uncertain_collisions = [
+        group for group in result.collisions if group.confidence == "uncertain"
+    ]
+
+    lines.extend(["", "## 唯一键碰撞组（确定）", ""])
+    if not certain_collisions:
+        lines.append("未发现可确认的唯一键碰撞组。")
     else:
-        for group in result.collisions[:100]:
+        for group in certain_collisions[:100]:
             lines.append(
                 f"### `{group.group_id}` · `{group.rule_id}`"
             )
@@ -154,10 +197,72 @@ def render_markdown(result: ScanResult) -> str:
                     f"{_md_code(participant.raw_display)} |"
                 )
             lines.append("")
-        if len(result.collisions) > 100:
+        if len(certain_collisions) > 100:
             lines.append(
-                f"> 页面仅展示前 100 组，其余 {len(result.collisions) - 100} 组见 `collisions.json` 与台账。"
+                f"> 页面仅展示前 100 组，其余 {len(certain_collisions) - 100} 组见 `collisions.json` 与台账。"
             )
+
+    lines.extend(["", "## 不确定碰撞组（替换解码污染）", ""])
+    if not uncertain_collisions:
+        lines.append("没有受替换解码污染的碰撞组。")
+    else:
+        lines.append(
+            "以下碰撞组至少含一个受解码替换污染的键，可能是不同非法字节被统一替换为 "
+            "U+FFFD 后合流造成的假象，**不得作为仲裁依据**；修复源数据并复跑确认。"
+        )
+        lines.append("")
+        lines.append("| 组 | 规则 | 目标键 | 记录数 | 受污染成员 |")
+        lines.append("|---|---|---|---:|---:|")
+        for group in uncertain_collisions[:100]:
+            tainted = sum(
+                1 for item in group.participants if item.confidence == "uncertain"
+            )
+            lines.append(
+                f"| {_md(group.group_id)} | {_md(group.rule_id)} | "
+                f"{_md_code(group.target_key_escaped)} | "
+                f"{len(group.participants)} | {tainted} |"
+            )
+        if len(uncertain_collisions) > 100:
+            lines.append(
+                f"\n> 页面仅展示前 100 组，其余 {len(uncertain_collisions) - 100} 组见 `collisions.json` 与台账。"
+            )
+
+    provenance = _taint_provenance(result)
+    lines.extend(["", "## 解码污染溯源", ""])
+    if not provenance:
+        lines.append("所有源均按声明编码严格解码，未发生替换。")
+    else:
+        lines.append(
+            "以下源含无法解码的字节，已用 U+FFFD 替代继续预检；"
+            "替换位置来源于逐字节复核，原始文件 SHA-256 仍绑定原字节。"
+        )
+        lines.append("")
+        lines.append("| 源 | 编码 | 替换字符 | 污染范围 | 受影响记录 | 受影响列 | 原因 |")
+        lines.append("|---|---|---:|---|---:|---|---|")
+        for row in provenance:
+            columns_text = ", ".join(row["affected_columns"]) or "—"
+            lines.append(
+                f"| {_md(row['source_id'])} | {_md(row['encoding'])} | "
+                f"{row['replacement_chars']} | "
+                f"{_md(_TAINT_SCOPE_LABEL.get(row['scope'], row['scope']))} | "
+                f"{row['affected_records']} | {_md(columns_text)} | "
+                f"{_md(row['reason'] or '—')} |"
+            )
+        lines.append("")
+        for row in provenance:
+            spans = row["byte_spans"]
+            if not spans:
+                continue
+            rendered = ", ".join(
+                f"[{span['start']}, {span['end']}) {span['reason']}" for span in spans[:10]
+            )
+            more = (
+                f" …共 {row['byte_spans_total']} 段"
+                if row["byte_spans_total"] > len(spans[:10])
+                else ""
+            )
+            lines.append(f"- `{row['source_id']}` 非法字节区间：{rendered}{more}")
+        lines.append("")
 
     lines.extend(["", "## 风险清单", ""])
     if not result.findings:
@@ -237,6 +342,8 @@ def render_plan_markdown(result: ScanResult) -> str:
         f"- 门禁等级：`{plan['gate']['fail_on']}`",
         f"- 当前阻断发现：**{plan['gate']['blocking_findings']}**",
         f"- 当前碰撞组：**{plan['gate']['collision_groups']}**",
+        f"- 不确定键：**{plan['gate'].get('uncertain_keys', 0)}** · "
+        f"不确定碰撞组：**{plan['gate'].get('uncertain_collision_groups', 0)}**",
         f"- 自动门禁结果：**{'通过' if plan['gate']['passes'] else '未通过'}**",
         "",
         "复跑命令模板：",
@@ -262,8 +369,8 @@ def render_plan_markdown(result: ScanResult) -> str:
             "",
             "## 规则就绪度",
             "",
-            "| 规则 | 源 / 列 | 目标 | 状态 | 记录 | 键变化 | 碰撞组 | 超限 | 阻断检查 |",
-            "|---|---|---|---|---:|---:|---:|---:|---|",
+            "| 规则 | 源 / 列 | 目标 | 状态 | 记录 | 不确定键 | 键变化 | 碰撞组 | 超限 | 阻断检查 |",
+            "|---|---|---|---|---:|---:|---:|---:|---:|---|",
         ]
     )
     for rule in plan["rules"]:
@@ -272,7 +379,7 @@ def render_plan_markdown(result: ScanResult) -> str:
             f"{_md_code(' + '.join(rule['columns']))} | "
             f"{_md_code(rule['destination'] or '—')} | "
             f"{_md(_STATUS_LABEL.get(rule['status'], rule['status']))} | "
-            f"{rule['records']} | {rule['changed_keys']} | "
+            f"{rule['records']} | {rule.get('uncertain_keys', 0)} | {rule['changed_keys']} | "
             f"{rule['collision_groups']} | {rule['overlength']} | "
             f"{_md(', '.join(rule['blocking_codes']) or '—')} |"
         )
@@ -295,13 +402,33 @@ def render_plan_markdown(result: ScanResult) -> str:
         if examples:
             lines.extend(
                 [
-                    "## 待裁决碰撞示例（最多 20 组）",
+                    "## 待裁决碰撞示例（确定，最多 20 组）",
                     "",
                     "| 组 | 规则 | 目标键 | 记录 |",
                     "|---|---|---|---|",
                 ]
             )
             for example in examples:
+                lines.append(
+                    f"| {_md(example['group_id'])} | {_md(example['rule_id'])} | "
+                    f"{_md_code(example['target_key_escaped'])} | "
+                    f"{_md(', '.join(str(item) for item in example['record_ids'] if item is not None) or '—')} |"
+                )
+            lines.append("")
+        uncertain_examples = plan["steps"][3].get("uncertain_examples", [])
+        if uncertain_examples:
+            lines.extend(
+                [
+                    "## 不可仲裁的不确定碰撞（替换解码污染，最多 20 组）",
+                    "",
+                    "以下碰撞组含受污染键，可能是替换字符合流造成的假象；"
+                    "禁止据此仲裁，需修复源数据后复跑。",
+                    "",
+                    "| 组 | 规则 | 目标键 | 记录 |",
+                    "|---|---|---|---|",
+                ]
+            )
+            for example in uncertain_examples:
                 lines.append(
                     f"| {_md(example['group_id'])} | {_md(example['rule_id'])} | "
                     f"{_md_code(example['target_key_escaped'])} | "
@@ -372,13 +499,21 @@ def render_html(result: ScanResult) -> str:
 
     collision_cards = []
     collision_cap = 100
-    for group in result.collisions[:collision_cap]:
+    certain_collisions = [
+        group for group in result.collisions if group.confidence == "certain"
+    ]
+    uncertain_collisions = [
+        group for group in result.collisions if group.confidence == "uncertain"
+    ]
+
+    def _collision_card(group: Any, *, uncertain: bool) -> str:
         member_rows = "\n".join(
             f"""
-              <tr>
+              <tr{' class="tainted-row"' if participant.confidence == 'uncertain' else ''}>
                 <td class="mono">{_e(participant.record_ref)}</td>
                 <td class="mono">{_e(participant.record_id or '∅')}</td>
                 <td class="mono value-cell">{_e(participant.raw_display)}</td>
+                <td>{'不确定' if participant.confidence == 'uncertain' else '确定'}</td>
               </tr>"""
             for participant in group.participants[:50]
         )
@@ -388,16 +523,29 @@ def render_html(result: ScanResult) -> str:
                 f'<p class="note">该组仅展示前 50 条；完整成员见 '
                 f"<code>collisions.json</code>。</p>"
             )
-        collision_cards.append(
-            f"""
-        <article class="collision-card">
+        banner = (
+            '<p class="taint-banner">含替换解码污染的键：可能是非法字节被统一替换为 '
+            "U+FFFD 后合流造成的假象，<strong>不得作为仲裁依据</strong>；"
+            "请修复源数据后复跑。</p>"
+            if uncertain
+            else ""
+        )
+        confidence_chip = (
+            '<span class="count-chip chip-uncertain">不确定</span>'
+            if uncertain
+            else '<span class="count-chip">确定</span>'
+        )
+        return f"""
+        <article class="collision-card{' collision-uncertain' if uncertain else ''}">
           <header>
             <div>
               <div class="eyebrow small">{_e(group.reason_code)}</div>
               <h3><span class="mono">{_e(group.group_id)}</span> <span class="muted">·</span> {_e(group.rule_id)}</h3>
             </div>
+            {confidence_chip}
             <span class="count-chip">{len(group.participants)} 条</span>
           </header>
+          {banner}
           <div class="collision-key">
             <span class="tiny-label">目标键</span>
             <code>{_e(group.target_key_escaped)}</code>
@@ -407,25 +555,89 @@ def render_html(result: ScanResult) -> str:
           </div>
           <div class="table-scroll compact">
             <table>
-              <thead><tr><th>记录引用</th><th>记录标识</th><th>原始值</th></tr></thead>
+              <thead><tr><th>记录引用</th><th>记录标识</th><th>原始值</th><th>键可信度</th></tr></thead>
               <tbody>{member_rows}</tbody>
             </table>
           </div>
           {more}
         </article>"""
-        )
+
+    for group in certain_collisions[:collision_cap]:
+        collision_cards.append(_collision_card(group, uncertain=False))
     if not collision_cards:
         collision_cards.append(
-            '<div class="empty-state"><strong>没有唯一键碰撞组</strong>'
-            "<span>归一化后每个唯一候选键都保持单记录映射。</span></div>"
+            '<div class="empty-state"><strong>没有确定的唯一键碰撞组</strong>'
+            "<span>归一化后每个唯一候选键都保持单记录映射，或相关组因替换解码污染被标为不确定。</span></div>"
         )
     collision_more = ""
-    if len(result.collisions) > collision_cap:
+    if len(certain_collisions) > collision_cap:
         collision_more = (
             f'<p class="note">页面仅展示前 {collision_cap} 组；'
-            f"其余 {len(result.collisions) - collision_cap} 组见 "
+            f"其余 {len(certain_collisions) - collision_cap} 组见 "
             f"<code>collisions.json</code> 与 SQLite 台账。</p>"
         )
+
+    uncertain_cards = [
+        _collision_card(group, uncertain=True)
+        for group in uncertain_collisions[:collision_cap]
+    ]
+    uncertain_section = ""
+    if uncertain_cards:
+        uncertain_section = f"""
+  <section class="section" id="uncertain-collisions">
+    <div class="section-head"><h2>不确定碰撞组（替换解码污染）</h2><p>禁止据此仲裁，修复源数据后复跑</p></div>
+    {''.join(uncertain_cards)}
+  </section>"""
+
+    provenance = _taint_provenance(result)
+    if provenance:
+        provenance_rows = "\n".join(
+            f"""
+        <tr>
+          <td><span class="mono strong">{_e(row['source_id'])}</span></td>
+          <td class="mono">{_e(row['encoding'])}</td>
+          <td class="num">{row['replacement_chars']}</td>
+          <td>{_e(_TAINT_SCOPE_LABEL.get(row['scope'], row['scope']))}</td>
+          <td class="num">{row['affected_records']}</td>
+          <td class="mono small">{_e(', '.join(row['affected_columns']) or '—')}</td>
+          <td class="small">{_e(row['reason'] or '—')}</td>
+        </tr>"""
+            for row in provenance
+        )
+        span_items = []
+        for row in provenance:
+            if not row["byte_spans"]:
+                continue
+            rendered = ", ".join(
+                f"[{span['start']}, {span['end']}) {span['reason']}"
+                for span in row["byte_spans"][:10]
+            )
+            more = (
+                f" …共 {row['byte_spans_total']} 段"
+                if row["byte_spans_total"] > 10
+                else ""
+            )
+            span_items.append(
+                f"<li><span class='mono'>{_e(row['source_id'])}</span>："
+                f"<span class='mono small'>{_e(rendered + more)}</span></li>"
+            )
+        span_list = (
+            f"<ul class='span-list'>{''.join(span_items)}</ul>" if span_items else ""
+        )
+        provenance_section = f"""
+  <section class="section" id="taint-provenance">
+    <div class="section-head"><h2>解码污染溯源</h2><p>替换位置经逐字节复核；原始文件哈希仍绑定原字节</p></div>
+    <div class="panel table-scroll">
+      <table>
+        <thead><tr><th>源</th><th>编码</th><th>替换字符</th><th>污染范围</th><th>受影响记录</th><th>受影响列</th><th>范围原因</th></tr></thead>
+        <tbody>{provenance_rows}</tbody>
+      </table>
+      <p class="note">合法编码的 U+FFFD 不计入替换字符；只有解码器插入的 U+FFFD 才会污染键判定。非法字节区间（原始文件字节偏移）：</p>
+      {span_list}
+    </div>
+  </section>"""
+    else:
+        provenance_section = ""
 
     severity_options = "\n".join(
         f'<option value="{_e(severity)}">{_e(SEVERITY_LABEL[severity])}</option>'
@@ -666,11 +878,13 @@ main {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 72p
 .sev-high.severity-tile {{ background: var(--red-soft); }} .sev-high.severity-tile strong {{ color: var(--red); }}
 .sev-medium.severity-tile {{ background: var(--amber-soft); }} .sev-medium.severity-tile strong {{ color: var(--amber); }}
 .sev-low.severity-tile {{ background: var(--teal-soft); }} .sev-low.severity-tile strong {{ color: var(--teal); }}
-.metrics {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }}
+.metrics {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }}
 .metric {{ background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }}
 .metric span {{ display: block; color: var(--ink-soft); font-size: 12px; }}
 .metric strong {{ display: block; font-family: var(--mono); font-size: 29px; letter-spacing: -.04em; margin-top: 4px; }}
 .metric small {{ color: var(--slate); }}
+.metric-uncertain {{ border-color: var(--amber); }}
+.metric-uncertain strong {{ color: var(--amber); }}
 .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 8px 28px rgba(24,35,31,.045); padding: 22px; }}
 .table-scroll {{ overflow-x: auto; }}
 table {{ width: 100%; border-collapse: collapse; font-size: 13.5px; }}
@@ -694,7 +908,13 @@ tbody tr:hover {{ background: #faf7f0; }}
 .status-ready, .status-done {{ color: var(--green); }}
 .status-review {{ color: var(--amber); }}
 .status-blocked {{ color: var(--red); }}
+.status-uncertain {{ color: var(--amber); border-width: 2px; }}
 .status-pending, .status-no_records {{ color: var(--slate); }}
+.taint-banner {{ background: var(--amber-soft); border: 1px solid var(--amber); border-radius: 10px; padding: 10px 12px; font-size: 12.5px; color: var(--ink); margin: 10px 0; }}
+.collision-uncertain {{ border-color: var(--amber); }}
+.chip-uncertain {{ background: var(--amber); color: #fff; margin-right: 6px; }}
+.tainted-row td {{ background: var(--amber-soft); }}
+.span-list {{ margin: 8px 0 0; padding-left: 19px; color: var(--ink-soft); font-size: 12.5px; }}
 .tiny-label {{ font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--slate); }}
 .note {{ color: var(--ink-soft); font-size: 12.5px; margin: 12px 0 0; }}
 .collisions {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }}
@@ -808,7 +1028,8 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
     <div class="metric"><span>记录</span><strong>{summary['record_count']:,}</strong><small>本次输入快照</small></div>
     <div class="metric"><span>目标键</span><strong>{summary['keys_evaluated']:,}</strong><small>{summary['key_rule_count']} 条规则</small></div>
     <div class="metric"><span>键值变化</span><strong>{summary['changed_keys']:,}</strong><small>归一化 / 折叠后</small></div>
-    <div class="metric"><span>碰撞组</span><strong>{summary['collision_groups']:,}</strong><small>{summary['collision_records']} 条记录</small></div>
+    <div class="metric"><span>碰撞组</span><strong>{summary['collision_groups']:,}</strong><small>{summary['collision_records']} 条记录 · 确定</small></div>
+    <div class="metric metric-uncertain"><span>不确定键</span><strong>{summary.get('uncertain_keys', 0):,}</strong><small>替换解码污染 · 含 {summary.get('uncertain_collision_groups', 0)} 个不确定碰撞组</small></div>
   </section>
 
   <section class="section" id="sources">
@@ -834,10 +1055,12 @@ footer {{ max-width: 1320px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px) 5
   </section>
 
   <section class="section" id="collisions">
-    <div class="section-head"><h2>唯一键碰撞组</h2><p>业务必须逐组裁决，工具不自动合并</p></div>
+    <div class="section-head"><h2>唯一键碰撞组（确定）</h2><p>业务必须逐组裁决，工具不自动合并</p></div>
     {''.join(collision_cards)}
     {collision_more}
   </section>
+  {uncertain_section}
+  {provenance_section}
 
   <section class="section" id="findings">
     <div class="section-head"><h2>风险清单</h2><p>全量明细见 findings.json 与 SQLite 台账</p></div>

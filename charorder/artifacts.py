@@ -71,8 +71,10 @@ def write_artifacts(
         "kind": "charorder.collisions",
         "run_id": result.run_id,
         "counts": {
-            "groups": len(result.collisions),
-            "records": sum(len(group.participants) for group in result.collisions),
+            "groups": result.summary["collision_groups"],
+            "records": result.summary["collision_records"],
+            "uncertain_groups": result.summary["uncertain_collision_groups"],
+            "uncertain_records": result.summary["uncertain_collision_records"],
         },
         "collisions": [group.to_dict() for group in result.collisions],
     }

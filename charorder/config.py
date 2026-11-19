@@ -34,6 +34,7 @@ _SOURCE_FIELDS = {
     "delimiter",
     "quotechar",
     "table",
+    "taint_tracking",
 }
 _KEY_FIELDS = {
     "id",
@@ -204,6 +205,14 @@ def _parse_source(item: Any, index: int, base_dir: Path) -> SourceSpec:
     if encoding_errors not in {"replace", "strict"}:
         raise ConfigError(f"{where}.encoding_errors 只能是 replace 或 strict。")
 
+    taint_tracking = _optional_str(
+        obj.get("taint_tracking", "precise"), f"{where}.taint_tracking"
+    ).lower()
+    if taint_tracking not in {"precise", "conservative"}:
+        raise ConfigError(
+            f"{where}.taint_tracking 只能是 precise 或 conservative。"
+        )
+
     delimiter = _optional_str(obj.get("delimiter", ","), f"{where}.delimiter")
     quotechar = _optional_str(obj.get("quotechar", '"'), f"{where}.quotechar")
     if kind == "csv":
@@ -245,6 +254,7 @@ def _parse_source(item: Any, index: int, base_dir: Path) -> SourceSpec:
         delimiter=delimiter,
         quotechar=quotechar,
         table=table,
+        taint_tracking=taint_tracking,
     )
 
 

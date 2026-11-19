@@ -145,14 +145,15 @@ def _verify_ledger(
     try:
         connection.execute("PRAGMA query_only = ON")
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version != 1:
-            errors.append(f"台账 user_version 应为 1，实际为 {version}。")
+        if version != 2:
+            errors.append(f"台账 user_version 应为 2，实际为 {version}。")
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
             errors.append(f"SQLite integrity_check 未通过：{integrity}")
 
         run = connection.execute(
-            "SELECT run_id, verdict, record_count, key_result_count, finding_count, collision_count "
+            "SELECT run_id, verdict, record_count, key_result_count, finding_count, "
+            "collision_count, uncertain_key_count, uncertain_collision_count "
             "FROM runs LIMIT 1"
         ).fetchone()
         if run is None:
@@ -168,12 +169,18 @@ def _verify_ledger(
                 "key_results": int(run[3]),
                 "findings": int(run[4]),
                 "collision_groups": int(run[5]),
+                "uncertain_keys": int(run[6]),
+                "uncertain_collision_groups": int(run[7]),
             }
+            certain_groups = summary.get("collision_groups", 0) or 0
+            uncertain_groups = summary.get("uncertain_collision_groups", 0) or 0
             expectations = {
                 "records": summary.get("record_count"),
                 "key_results": summary.get("keys_evaluated"),
                 "findings": summary.get("findings_total"),
-                "collision_groups": summary.get("collision_groups"),
+                "collision_groups": certain_groups + uncertain_groups,
+                "uncertain_keys": summary.get("uncertain_keys", 0),
+                "uncertain_collision_groups": uncertain_groups,
             }
             for key, expected in expectations.items():
                 if counts.get(key) != expected:
@@ -193,14 +200,28 @@ def _verify_ledger(
         actual_members = connection.execute(
             "SELECT COUNT(*) FROM collision_members"
         ).fetchone()[0]
+        certain_groups = summary.get("collision_groups", 0) or 0
+        uncertain_groups = summary.get("uncertain_collision_groups", 0) or 0
+        certain_records = summary.get("collision_records", 0) or 0
+        uncertain_records = summary.get("uncertain_collision_records", 0) or 0
         if actual_findings != summary.get("findings_total"):
             errors.append("台账 findings 行数与 manifest 不一致。")
         if actual_keys != summary.get("keys_evaluated"):
             errors.append("台账 key_results 行数与 manifest 不一致。")
-        if actual_collisions != summary.get("collision_groups"):
+        if actual_collisions != certain_groups + uncertain_groups:
             errors.append("台账 collisions 行数与 manifest 不一致。")
-        if actual_members != summary.get("collision_records"):
+        if actual_members != certain_records + uncertain_records:
             errors.append("台账 collision_members 行数与 manifest 不一致。")
+        uncertain_key_rows = connection.execute(
+            "SELECT COUNT(*) FROM key_results WHERE confidence = 'uncertain'"
+        ).fetchone()[0]
+        if uncertain_key_rows != summary.get("uncertain_keys", 0):
+            errors.append("台账不确定键计数与 manifest 不一致。")
+        uncertain_collision_rows = connection.execute(
+            "SELECT COUNT(*) FROM collisions WHERE confidence = 'uncertain'"
+        ).fetchone()[0]
+        if uncertain_collision_rows != uncertain_groups:
+            errors.append("台账不确定碰撞组计数与 manifest 不一致。")
         return {
             "integrity_check": integrity,
             "findings": actual_findings,

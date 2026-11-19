@@ -30,8 +30,13 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
         stats = rule_stats[rule.id]
         rule_high = stats["findings_by_severity"].get("high", 0)
         rule_medium = stats["findings_by_severity"].get("medium", 0)
+        uncertain_keys = stats.get("uncertain_keys", 0)
         if stats["records"] == 0:
             status = "no_records"
+        elif uncertain_keys:
+            # Tainted evidence outranks everything else: the rule's keys
+            # cannot be confirmed until the source is fixed and re-scanned.
+            status = "uncertain"
         elif rule_high:
             status = "blocked"
         elif rule_medium:
@@ -52,11 +57,14 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 "transform": rule.transform.as_dict(),
                 "transform_text": rule.transform.describe(),
                 "status": status,
+                "confidence": "uncertain" if uncertain_keys else "certain",
                 "records": stats["records"],
                 "non_null_keys": stats["non_null_keys"],
                 "changed_keys": stats["changed_keys"],
+                "uncertain_keys": uncertain_keys,
                 "collision_groups": stats["collision_groups"],
                 "collision_records": stats["collision_records"],
+                "uncertain_collision_groups": stats.get("uncertain_collision_groups", 0),
                 "overlength": stats["overlength"],
                 "findings_by_severity": stats["findings_by_severity"],
                 "blocking_codes": sorted(
@@ -69,24 +77,36 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             }
         )
 
-    collision_steps = []
-    for collision in result.collisions[:20]:
-        collision_steps.append(
-            {
-                "group_id": collision.group_id,
-                "rule_id": collision.rule_id,
-                "source_id": collision.source_id,
-                "target_key_escaped": collision.target_key_escaped,
-                "reason_code": collision.reason_code,
-                "record_count": len(collision.participants),
-                "record_ids": [
-                    participant.record_id for participant in collision.participants
-                ],
-                "record_refs": [
-                    participant.record_ref for participant in collision.participants
-                ],
-            }
-        )
+    certain_collisions = [
+        collision for collision in result.collisions if collision.confidence == "certain"
+    ]
+    uncertain_collisions = [
+        collision
+        for collision in result.collisions
+        if collision.confidence == "uncertain"
+    ]
+
+    def _collision_step(collision: Any) -> dict[str, Any]:
+        return {
+            "group_id": collision.group_id,
+            "rule_id": collision.rule_id,
+            "source_id": collision.source_id,
+            "target_key_escaped": collision.target_key_escaped,
+            "reason_code": collision.reason_code,
+            "confidence": collision.confidence,
+            "record_count": len(collision.participants),
+            "record_ids": [
+                participant.record_id for participant in collision.participants
+            ],
+            "record_refs": [
+                participant.record_ref for participant in collision.participants
+            ],
+        }
+
+    # Only certain groups may be arbitated; tainted groups are listed apart
+    # and require a source fix plus re-run, never business adjudication.
+    collision_steps = [_collision_step(c) for c in certain_collisions[:20]]
+    uncertain_collision_steps = [_collision_step(c) for c in uncertain_collisions[:20]]
 
     source_invalid = [
         {
@@ -101,10 +121,15 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
     ]
 
     any_blocking = high > 0
+    uncertain_keys = summary.get("uncertain_keys", 0)
+    uncertain_collision_groups = summary.get("uncertain_collision_groups", 0)
     collision_blocking = sum(
         1
         for finding in high_findings
         if finding.code in {"NORMALIZATION_COLLISION", "DUPLICATE_KEY"}
+    )
+    uncertain_collision_blocking = sum(
+        1 for finding in high_findings if finding.code == "UNCERTAIN_COLLISION"
     )
 
     steps = [
@@ -139,25 +164,35 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "title": "清除编码、缺失与长度阻断项",
             "status": "blocked" if any_blocking else "ready",
             "detail": (
-                f"当前有 {high} 项高等级发现，涉及 {len(blocking_codes)} 类检查。"
+                f"当前有 {high} 项高等级发现，涉及 {len(blocking_codes)} 类检查；"
+                f"其中 {uncertain_keys} 个目标键因源替换解码污染被标为不确定，"
+                "不得当作真实源值使用。"
                 if any_blocking
                 else "没有高等级编码、缺失或长度问题。"
             ),
-            "acceptance": "高等级发现为 0；源不可解码字节、替代字符与超限键全部有处置记录。",
+            "acceptance": "高等级发现为 0；源不可解码字节、替代字符与超限键全部有处置记录；不确定键为 0。",
             "blocking_codes": dict(sorted(blocking_codes.items())),
         },
         {
             "order": 4,
             "phase": "collisions",
             "title": "人工仲裁唯一键碰撞组",
-            "status": "blocked" if collision_blocking else "ready",
-            "detail": (
-                f"发现 {summary['collision_groups']} 个唯一键碰撞组，"
-                f"涉及 {summary['collision_records']} 条记录；工具不自动合并、删除或改写业务记录。"
+            "status": (
+                "blocked"
+                if collision_blocking or uncertain_collision_blocking
+                else "ready"
             ),
-            "acceptance": "每个碰撞组均有业务负责人裁决；唯一键重跑后碰撞组为 0。",
+            "detail": (
+                f"发现 {summary['collision_groups']} 个确定的唯一键碰撞组，"
+                f"涉及 {summary['collision_records']} 条记录；"
+                f"另有 {uncertain_collision_groups} 个碰撞组含替换解码污染、"
+                "无法确认，不得作为仲裁依据，需修复源数据后复跑。"
+                "工具不自动合并、删除或改写业务记录。"
+            ),
+            "acceptance": "每个确定碰撞组均有业务负责人裁决；不确定碰撞组为 0；唯一键重跑后碰撞组为 0。",
             "evidence": ["collisions.json"],
             "examples": collision_steps,
+            "uncertain_examples": uncertain_collision_steps,
         },
         {
             "order": 5,
@@ -201,11 +236,11 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "status": "pending",
             "detail": (
                 "使用同一配置复跑并启用 --fail-on high。"
-                "只有碰撞组为 0、高等级发现为 0、输入哈希未变化时才允许切换。"
+                "只有碰撞组为 0、不确定键为 0、高等级发现为 0、输入哈希未变化时才允许切换。"
             ),
             "acceptance": (
                 "复跑命令退出码为 0；manifest.json 校验通过；"
-                "碰撞组 0；所有必需键非空。"
+                "碰撞组 0；不确定键 0；所有必需键非空。"
             ),
             "evidence": ["manifest.json", "report.html"],
         },
@@ -227,7 +262,14 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "fail_on": "high",
             "blocking_findings": high,
             "collision_groups": summary["collision_groups"],
-            "passes": high == 0 and summary["collision_groups"] == 0,
+            "uncertain_collision_groups": uncertain_collision_groups,
+            "uncertain_keys": uncertain_keys,
+            "passes": (
+                high == 0
+                and summary["collision_groups"] == 0
+                and uncertain_collision_groups == 0
+                and uncertain_keys == 0
+            ),
         },
         "summary": {
             "source_count": summary["source_count"],
@@ -236,12 +278,17 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "keys_evaluated": summary["keys_evaluated"],
             "non_null_keys": summary["non_null_keys"],
             "changed_keys": summary["changed_keys"],
+            "uncertain_keys": uncertain_keys,
             "findings_by_severity": {
                 severity: summary["findings_by_severity"].get(severity, 0)
                 for severity in SEVERITIES
             },
             "collision_groups": summary["collision_groups"],
             "collision_records": summary["collision_records"],
+            "uncertain_collision_groups": uncertain_collision_groups,
+            "uncertain_collision_records": summary.get(
+                "uncertain_collision_records", 0
+            ),
             "overlength_keys": summary["overlength_keys"],
         },
         "source_fingerprints": [
@@ -253,6 +300,8 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 "size_bytes": source["size_bytes"],
                 "encoding": source["encoding"],
                 "records": source["records"],
+                "tainted_records": source.get("tainted_records", 0),
+                "uncertain_keys": source.get("uncertain_keys", 0),
                 "status": (
                     "blocked"
                     if source["findings_by_severity"].get("high", 0)
@@ -271,6 +320,7 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "不得自动“修复”疑似乱码而覆盖原值",
             "不得把校验失败的目标键直接写入生产唯一索引",
             "不得将源文件或 SQLite 台账当作可回写数据源",
+            "不得把替换解码产生的不确定键或不确定碰撞组当作真实业务证据进行仲裁、合并或放行",
         ],
         "reproduce": {
             "config_file": config.config_path.name,

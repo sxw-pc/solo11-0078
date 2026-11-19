@@ -41,7 +41,7 @@ def write_ledger(result: ScanResult, path: Path) -> None:
 def _create_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
         CREATE TABLE meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -61,7 +61,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             record_count INTEGER NOT NULL,
             key_result_count INTEGER NOT NULL,
             finding_count INTEGER NOT NULL,
-            collision_count INTEGER NOT NULL
+            collision_count INTEGER NOT NULL,
+            uncertain_key_count INTEGER NOT NULL,
+            uncertain_collision_count INTEGER NOT NULL
         );
         CREATE TABLE sources (
             source_id TEXT PRIMARY KEY,
@@ -114,6 +116,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             key_bytes INTEGER NOT NULL,
             key_chars INTEGER NOT NULL,
             changed INTEGER NOT NULL,
+            confidence TEXT NOT NULL,
+            taint_scope TEXT,
+            tainted_columns_json TEXT NOT NULL,
             collision_group_id TEXT,
             defects_json TEXT NOT NULL
         );
@@ -138,6 +143,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             target_key TEXT NOT NULL,
             target_key_escaped TEXT NOT NULL,
             reason_code TEXT NOT NULL,
+            confidence TEXT NOT NULL,
             record_count INTEGER NOT NULL,
             distinct_raw_count INTEGER NOT NULL,
             raw_variants_json TEXT NOT NULL
@@ -147,6 +153,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             key_result_id TEXT NOT NULL,
             record_ref TEXT NOT NULL,
             record_id TEXT,
+            confidence TEXT NOT NULL,
             PRIMARY KEY (group_id, key_result_id)
         );
         CREATE INDEX ix_key_results_rule ON key_results (rule_id, target_key);
@@ -178,7 +185,7 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             ("app", APP_NAME),
             ("slug", APP_SLUG),
             ("version", __version__),
-            ("schema_version", "1"),
+            ("schema_version", "2"),
             ("run_id", result.run_id),
             ("ledger_written_at", result.generated_at),
         ],
@@ -190,8 +197,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
         INSERT INTO runs (
             run_id, app, slug, version, unicode_version, project, target,
             generated_at, config_path, config_sha256, verdict, record_count,
-            key_result_count, finding_count, collision_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            key_result_count, finding_count, collision_count,
+            uncertain_key_count, uncertain_collision_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             result.run_id,
@@ -208,7 +216,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             summary["record_count"],
             summary["keys_evaluated"],
             summary["findings_total"],
-            summary["collision_groups"],
+            summary["collision_groups"] + summary.get("uncertain_collision_groups", 0),
+            summary.get("uncertain_keys", 0),
+            summary.get("uncertain_collision_groups", 0),
         ),
     )
 
@@ -286,8 +296,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             key_result_id, run_id, source_id, rule_id, ordinal, record_ref,
             record_id, raw_values_json, raw_display, target_key,
             target_key_escaped, key_sha256, key_bytes, key_chars, changed,
+            confidence, taint_scope, tainted_columns_json,
             collision_group_id, defects_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -306,6 +317,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 item.key_bytes,
                 item.key_chars,
                 int(item.changed),
+                item.confidence,
+                item.taint_scope,
+                _json(list(item.tainted_columns)),
                 item.collision_group_id,
                 _json(
                     [
@@ -353,8 +367,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
         """
         INSERT INTO collisions (
             group_id, run_id, rule_id, source_id, target_key, target_key_escaped,
-            reason_code, record_count, distinct_raw_count, raw_variants_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            reason_code, confidence, record_count, distinct_raw_count, raw_variants_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -365,6 +379,7 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 group.target_key,
                 group.target_key_escaped,
                 group.reason_code,
+                group.confidence,
                 len(group.participants),
                 len(group.raw_variants),
                 _json(group.raw_variants),
@@ -375,8 +390,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
     connection.executemany(
         """
         INSERT INTO collision_members (
-            group_id, key_result_id, record_ref, record_id
-        ) VALUES (?, ?, ?, ?)
+            group_id, key_result_id, record_ref, record_id, confidence
+        ) VALUES (?, ?, ?, ?, ?)
         """,
         [
             (
@@ -384,6 +399,7 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 participant.key_result_id,
                 participant.record_ref,
                 participant.record_id,
+                participant.confidence,
             )
             for group in result.collisions
             for participant in group.participants

@@ -31,6 +31,8 @@ DEFAULT_SEVERITIES: dict[str, str] = {
     "COMPOSITE_SEPARATOR": "high",
     "NORMALIZATION_COLLISION": "high",
     "DUPLICATE_KEY": "high",
+    "UNCERTAIN_KEY": "high",
+    "UNCERTAIN_COLLISION": "high",
 }
 
 CHECK_CODES = tuple(DEFAULT_SEVERITIES.keys())
@@ -56,6 +58,8 @@ CHECK_LABELS: dict[str, str] = {
     "COMPOSITE_SEPARATOR": "复合键含保留分隔符",
     "NORMALIZATION_COLLISION": "归一化后唯一键碰撞",
     "DUPLICATE_KEY": "相同原始值唯一键重复",
+    "UNCERTAIN_KEY": "替换解码污染导致键不确定",
+    "UNCERTAIN_COLLISION": "碰撞组含替换解码污染，无法确认",
 }
 
 VERDICT_LABEL = {
@@ -85,6 +89,7 @@ class SourceSpec:
     delimiter: str = ","
     quotechar: str = '"'
     table: str | None = None
+    taint_tracking: str = "precise"
 
 
 @dataclass(frozen=True)
@@ -175,6 +180,16 @@ class SourceRecord:
     record_id: str | None
     values: dict[str, Any]
     defects: list[Defect] = field(default_factory=list)
+    # Decoder-inserted U+FFFD taint provenance. ``tainted_columns`` holds the
+    # columns proven to contain replacement characters inserted by the decoder
+    # (never legitimate U+FFFD that was already encoded in the source bytes).
+    # ``taint_unknown`` is True when the record is known to contain decoder
+    # replacements but column attribution is not provable (JSONL line, CSV
+    # fallback, or whole-source conservative scope). ``taint_scope`` is one of
+    # "none" | "field" | "record" | "source".
+    tainted_columns: frozenset[str] = field(default_factory=frozenset)
+    taint_unknown: bool = False
+    taint_scope: str = "none"
 
 
 @dataclass(frozen=True)
@@ -244,6 +259,11 @@ class KeyResult:
     changed: bool
     defects: list[Defect] = field(default_factory=list)
     collision_group_id: str | None = None
+    # "certain" when every input column of the key is provably free of
+    # decoder-inserted replacement characters; "uncertain" otherwise.
+    confidence: str = "certain"
+    taint_scope: str | None = None  # "field" | "record" | "source" when uncertain
+    tainted_columns: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -260,6 +280,9 @@ class KeyResult:
             "key_bytes": self.key_bytes,
             "key_chars": self.key_chars,
             "changed": self.changed,
+            "confidence": self.confidence,
+            "taint_scope": self.taint_scope,
+            "tainted_columns": list(self.tainted_columns),
             "defects": [
                 {"code": d.code, "severity": d.severity, "column": d.column}
                 for d in self.defects
@@ -278,6 +301,10 @@ class CollisionGroup:
     reason_code: str
     participants: list[KeyResult]
     raw_variants: list[str]
+    # "certain" only when every participant key is free of decoder-replacement
+    # taint; a group with any tainted participant can never be confirmed and
+    # must not be treated as a real arbitration object.
+    confidence: str = "certain"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -287,6 +314,7 @@ class CollisionGroup:
             "target_key": self.target_key,
             "target_key_escaped": self.target_key_escaped,
             "reason_code": self.reason_code,
+            "confidence": self.confidence,
             "record_count": len(self.participants),
             "distinct_raw_count": len(self.raw_variants),
             "participants": [
@@ -296,6 +324,7 @@ class CollisionGroup:
                     "record_id": k.record_id,
                     "raw_values": list(k.raw_values),
                     "raw_display": k.raw_display,
+                    "confidence": k.confidence,
                 }
                 for k in self.participants
             ],

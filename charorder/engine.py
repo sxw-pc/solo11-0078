@@ -198,6 +198,44 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
         )
     )
 
+    # Aggregate tainted keys into one finding per (source, rule) so reviewers
+    # see exactly which key rules lost certainty, without flooding the list.
+    uncertain_by_rule: dict[tuple[str, str], list[KeyResult]] = defaultdict(list)
+    for result in key_results:
+        if result.confidence == "uncertain":
+            uncertain_by_rule[(result.source_id, result.rule_id)].append(result)
+    for (source_id, rule_id), tainted_results in sorted(
+        uncertain_by_rule.items(),
+        key=lambda item: (
+            source_order.get(item[0][0], 999),
+            rule_order.get(item[0][1], 999),
+        ),
+    ):
+        scopes = {result.taint_scope for result in tainted_results}
+        add_finding(
+            "UNCERTAIN_KEY",
+            (
+                f"规则 {rule_id} 有 {len(tainted_results)} 个目标键受源替换解码污染，"
+                "键判定不确定；修复源数据并复跑确认前不得据此放行或仲裁"
+            ),
+            source_id=source_id,
+            rule_id=rule_id,
+            details={
+                "uncertain_keys": len(tainted_results),
+                "taint_scope": sorted(scope for scope in scopes if scope),
+                "sample": [
+                    {
+                        "record_ref": result.record_ref,
+                        "record_id": result.record_id,
+                        "key_result_id": result.key_result_id,
+                        "tainted_columns": list(result.tainted_columns),
+                    }
+                    for result in tainted_results[:20]
+                ],
+            },
+            severity=config.severity_for("UNCERTAIN_KEY"),
+        )
+
     collisions: list[CollisionGroup] = []
     by_rule_key: dict[tuple[str, str], list[KeyResult]] = defaultdict(list)
     for result in key_results:
@@ -224,6 +262,12 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
             if len(raw_variants_set) > 1
             else "DUPLICATE_KEY"
         )
+        uncertain_members = [
+            participant
+            for participant in participants
+            if participant.confidence == "uncertain"
+        ]
+        confidence = "uncertain" if uncertain_members else "certain"
         group_id = _collision_id(run_id, rule_id, target_key)
         for participant in participants:
             participant.collision_group_id = group_id
@@ -241,8 +285,42 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
                     for participant in participants
                 }
             ),
+            confidence=confidence,
         )
         collisions.append(group)
+        if confidence == "uncertain":
+            # Replacement decoding may have manufactured or masked this
+            # group; it must never be presented as a real arbitration object.
+            add_finding(
+                "UNCERTAIN_COLLISION",
+                (
+                    f"唯一键 {rule_id} 有 {len(participants)} 条记录映射到目标键 "
+                    f"{group.target_key_escaped}，其中 {len(uncertain_members)} 条记录的键"
+                    "受替换解码污染，碰撞无法确认；不得据此仲裁，需修复源数据后复跑"
+                ),
+                source_id=rule.source_id,
+                rule_id=rule_id,
+                details={
+                    "group_id": group_id,
+                    "confidence": "uncertain",
+                    "uncertain_participants": len(uncertain_members),
+                    "target_key_sha256": sha256_text(target_key),
+                    "target_key_escaped": group.target_key_escaped,
+                    "record_count": len(participants),
+                    "distinct_raw_count": len(raw_variants_set),
+                    "sample_participants": [
+                        {
+                            "record_ref": participant.record_ref,
+                            "record_id": participant.record_id,
+                            "raw_display": participant.raw_display,
+                            "confidence": participant.confidence,
+                        }
+                        for participant in participants[:20]
+                    ],
+                },
+                severity=config.severity_for("UNCERTAIN_COLLISION"),
+            )
+            continue
         add_finding(
             reason,
             (
@@ -253,6 +331,7 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
             rule_id=rule_id,
             details={
                 "group_id": group_id,
+                "confidence": "certain",
                 "target_key_sha256": sha256_text(target_key),
                 "target_key_escaped": group.target_key_escaped,
                 "record_count": len(participants),
@@ -312,6 +391,10 @@ def _evaluate_key(
     defects: list[Defect] = []
     raw_components: list[str | None] = []
     missing_columns: list[str] = []
+    tainted_columns = tuple(
+        column for column in rule.columns if column in record.tainted_columns
+    )
+    uncertain = record.taint_unknown or bool(tainted_columns)
 
     for column in rule.columns:
         raw = record.values.get(column)
@@ -321,12 +404,22 @@ def _evaluate_key(
         raw_components.append(raw_str)
         if raw_str is not None:
             for issue in analyze_text(raw_str, column=column):
+                details = dict(issue.details)
+                if issue.code == "REPLACEMENT_CHARACTER":
+                    # Distinguish decoder-inserted U+FFFD from legitimate
+                    # U+FFFD that was already encoded in the source bytes.
+                    if column in record.tainted_columns:
+                        details["replacement_origin"] = "decoder_inserted"
+                    elif record.taint_unknown:
+                        details["replacement_origin"] = "unknown_record_tainted"
+                    else:
+                        details["replacement_origin"] = "preexisting_in_source"
                 defects.append(
                     Defect(
                         code=issue.code,
                         severity=config.severity_for(issue.code),
                         message=issue.message,
-                        details=issue.details,
+                        details=details,
                         column=issue.column,
                     )
                 )
@@ -437,6 +530,9 @@ def _evaluate_key(
         key_chars=key_chars,
         changed=changed,
         defects=defects,
+        confidence="uncertain" if uncertain else "certain",
+        taint_scope=record.taint_scope if uncertain else None,
+        tainted_columns=tainted_columns,
     )
 
 
@@ -463,13 +559,24 @@ def _summarize(
     severity_counts = Counter(finding.severity for finding in findings)
     code_counts = Counter(finding.code for finding in findings)
     source_order = {source.id: index for index, source in enumerate(config.sources)}
+    certain_collisions = [
+        group for group in collisions if group.confidence == "certain"
+    ]
+    uncertain_collisions = [
+        group for group in collisions if group.confidence == "uncertain"
+    ]
 
     rule_summaries: list[dict[str, Any]] = []
     for rule in config.keys:
         related_results = [result for result in results if result.rule_id == rule.id]
         related_findings = [finding for finding in findings if finding.rule_id == rule.id]
         rule_collisions = [
-            collision for collision in collisions if collision.rule_id == rule.id
+            collision for collision in certain_collisions if collision.rule_id == rule.id
+        ]
+        rule_uncertain_collisions = [
+            collision
+            for collision in uncertain_collisions
+            if collision.rule_id == rule.id
         ]
         rule_severity = Counter(finding.severity for finding in related_findings)
         rule_summaries.append(
@@ -482,9 +589,19 @@ def _summarize(
                     1 for result in related_results if result.target_key is not None
                 ),
                 "changed_keys": sum(1 for result in related_results if result.changed),
+                "uncertain_keys": sum(
+                    1
+                    for result in related_results
+                    if result.confidence == "uncertain"
+                ),
                 "collision_groups": len(rule_collisions),
                 "collision_records": sum(
                     len(collision.participants) for collision in rule_collisions
+                ),
+                "uncertain_collision_groups": len(rule_uncertain_collisions),
+                "uncertain_collision_records": sum(
+                    len(collision.participants)
+                    for collision in rule_uncertain_collisions
                 ),
                 "overlength": sum(
                     1
@@ -528,6 +645,12 @@ def _summarize(
                 "records": len(load.records),
                 "columns": list(load.columns),
                 "key_results": len(source_results),
+                "tainted_records": sum(
+                    1 for record in load.records if record.taint_scope != "none"
+                ),
+                "uncertain_keys": sum(
+                    1 for result in source_results if result.confidence == "uncertain"
+                ),
                 "source_findings": len(source_findings),
                 "findings": sum(
                     1
@@ -550,13 +673,20 @@ def _summarize(
         "keys_evaluated": len(results),
         "non_null_keys": sum(1 for result in results if result.target_key is not None),
         "changed_keys": sum(1 for result in results if result.changed),
+        "uncertain_keys": sum(
+            1 for result in results if result.confidence == "uncertain"
+        ),
         "findings_total": len(findings),
         "findings_by_severity": {
             severity: severity_counts.get(severity, 0) for severity in SEVERITIES
         },
         "findings_by_code": dict(sorted(code_counts.items())),
-        "collision_groups": len(collisions),
-        "collision_records": sum(len(group.participants) for group in collisions),
+        "collision_groups": len(certain_collisions),
+        "collision_records": sum(len(group.participants) for group in certain_collisions),
+        "uncertain_collision_groups": len(uncertain_collisions),
+        "uncertain_collision_records": sum(
+            len(group.participants) for group in uncertain_collisions
+        ),
         "overlength_keys": sum(
             1
             for result in results
