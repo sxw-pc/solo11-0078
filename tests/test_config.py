@@ -120,6 +120,17 @@ class ConfigFailureTests(unittest.TestCase):
         config["reports"]["max_report_rows"] = 0
         self._expect(config, "1..100000")
 
+    def test_invalid_byte_policy_rejects_unknown_value(self) -> None:
+        config = copy.deepcopy(self.base)
+        config["sources"][0]["invalid_byte_policy"] = "guess"
+        self._expect(config, "invalid_byte_policy 只能是")
+
+    def test_whole_source_policy_requires_replace(self) -> None:
+        config = copy.deepcopy(self.base)
+        config["sources"][0]["encoding_errors"] = "strict"
+        config["sources"][0]["invalid_byte_policy"] = "whole_source"
+        self._expect(config, "需要 encoding_errors=replace")
+
     def test_csv_delimiter_must_be_one_character(self) -> None:
         config = copy.deepcopy(self.base)
         config["sources"][0]["delimiter"] = "||"

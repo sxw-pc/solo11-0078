@@ -34,6 +34,9 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             status = "no_records"
         elif rule_high:
             status = "blocked"
+        elif stats["uncertain_keys"]:
+            # Decoder-repaired key evidence must never be released as ready.
+            status = "uncertain"
         elif rule_medium:
             status = "review"
         else:
@@ -55,8 +58,12 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 "records": stats["records"],
                 "non_null_keys": stats["non_null_keys"],
                 "changed_keys": stats["changed_keys"],
+                "determinate_keys": stats["determinate_keys"],
+                "uncertain_keys": stats["uncertain_keys"],
                 "collision_groups": stats["collision_groups"],
                 "collision_records": stats["collision_records"],
+                "uncertain_collision_groups": stats["uncertain_collision_groups"],
+                "uncertain_collision_records": stats["uncertain_collision_records"],
                 "overlength": stats["overlength"],
                 "findings_by_severity": stats["findings_by_severity"],
                 "blocking_codes": sorted(
@@ -69,8 +76,16 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             }
         )
 
+    # Only determinate groups are arbitration steps.  Uncertain groups are kept
+    # in a separate list so the plan never presents forged collisions as work.
+    determinate_collisions = [
+        collision for collision in result.collisions if collision.determinate
+    ]
+    uncertain_collisions = [
+        collision for collision in result.collisions if not collision.determinate
+    ]
     collision_steps = []
-    for collision in result.collisions[:20]:
+    for collision in determinate_collisions[:20]:
         collision_steps.append(
             {
                 "group_id": collision.group_id,
@@ -78,6 +93,28 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 "source_id": collision.source_id,
                 "target_key_escaped": collision.target_key_escaped,
                 "reason_code": collision.reason_code,
+                "uncertainty": collision.uncertainty,
+                "record_count": len(collision.participants),
+                "record_ids": [
+                    participant.record_id for participant in collision.participants
+                ],
+                "record_refs": [
+                    participant.record_ref for participant in collision.participants
+                ],
+            }
+        )
+    uncertain_collision_steps = []
+    for collision in uncertain_collisions[:20]:
+        uncertain_collision_steps.append(
+            {
+                "group_id": collision.group_id,
+                "rule_id": collision.rule_id,
+                "source_id": collision.source_id,
+                "target_key_escaped": collision.target_key_escaped,
+                "reason_code": collision.reason_code,
+                "uncertainty": collision.uncertainty,
+                "uncertain_participants": collision.uncertain_participants,
+                "uncertainty_reasons": collision.uncertainty_reasons,
                 "record_count": len(collision.participants),
                 "record_ids": [
                     participant.record_id for participant in collision.participants
@@ -106,6 +143,8 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
         for finding in high_findings
         if finding.code in {"NORMALIZATION_COLLISION", "DUPLICATE_KEY"}
     )
+    uncertain_keys = summary["uncertain_keys"]
+    uncertain_collision_groups = summary["uncertain_collision_groups"]
 
     steps = [
         {
@@ -129,6 +168,8 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 f"按 {summary['key_rule_count']} 条声明式规则生成 "
                 f"{summary['keys_evaluated']} 个目标键；"
                 f"{summary['changed_keys']} 个键经过归一化或折叠后发生变化。"
+                f"其中 {summary['determinate_keys']} 个键证据确定，"
+                f"{uncertain_keys} 个键因解码替换字符标记为不确定。"
             ),
             "acceptance": "目标库排序规则与计划中的 binary UTF-8 键语义一致，不使用系统 locale。",
             "evidence": ["plan.json", "keys.jsonl"],
@@ -137,27 +178,71 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "order": 3,
             "phase": "blockers",
             "title": "清除编码、缺失与长度阻断项",
-            "status": "blocked" if any_blocking else "ready",
+            "status": (
+                "blocked"
+                if any_blocking
+                else "uncertain"
+                if uncertain_keys
+                else "ready"
+            ),
             "detail": (
                 f"当前有 {high} 项高等级发现，涉及 {len(blocking_codes)} 类检查。"
                 if any_blocking
-                else "没有高等级编码、缺失或长度问题。"
+                else (
+                    f"没有高等级发现，但有 {uncertain_keys} 个目标键由解码替换字符构成；"
+                    "这些键不能作为确定迁移证据。"
+                    if uncertain_keys
+                    else "没有高等级编码、缺失或长度问题。"
+                )
             ),
-            "acceptance": "高等级发现为 0；源不可解码字节、替代字符与超限键全部有处置记录。",
+            "acceptance": (
+                "高等级发现为 0；源不可解码字节、替代字符与超限键全部有处置记录；"
+                "所有不确定键均已修复源字节或明确排除。"
+            ),
             "blocking_codes": dict(sorted(blocking_codes.items())),
+            "uncertain_keys": uncertain_keys,
+            "uncertain_columns": sorted(
+                {
+                    column
+                    for key in result.key_results
+                    if not key.determinate
+                    for column in key.uncertain_columns
+                }
+            ),
+            "uncertain_rules": sorted(
+                {
+                    key.rule_id
+                    for key in result.key_results
+                    if not key.determinate
+                }
+            ),
         },
         {
             "order": 4,
             "phase": "collisions",
             "title": "人工仲裁唯一键碰撞组",
-            "status": "blocked" if collision_blocking else "ready",
-            "detail": (
-                f"发现 {summary['collision_groups']} 个唯一键碰撞组，"
-                f"涉及 {summary['collision_records']} 条记录；工具不自动合并、删除或改写业务记录。"
+            "status": (
+                "blocked"
+                if collision_blocking
+                else "uncertain"
+                if uncertain_collision_groups
+                else "ready"
             ),
-            "acceptance": "每个碰撞组均有业务负责人裁决；唯一键重跑后碰撞组为 0。",
+            "detail": (
+                f"发现 {summary['determinate_collision_groups']} 个确定碰撞组，"
+                f"涉及 {summary['determinate_collision_records']} 条记录；"
+                f"另有 {uncertain_collision_groups} 个含解码替换成员的碰撞组仅作待复核，"
+                "不得据此仲裁。工具不自动合并、删除或改写业务记录。"
+            ),
+            "acceptance": (
+                "每个确定碰撞组均有业务负责人裁决；不确定碰撞组先修复源字节后复跑；"
+                "唯一键重跑后确定碰撞组为 0。"
+            ),
             "evidence": ["collisions.json"],
             "examples": collision_steps,
+            "uncertain_examples": uncertain_collision_steps,
+            "determinate_groups": summary["determinate_collision_groups"],
+            "uncertain_groups": uncertain_collision_groups,
         },
         {
             "order": 5,
@@ -201,11 +286,12 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "status": "pending",
             "detail": (
                 "使用同一配置复跑并启用 --fail-on high。"
-                "只有碰撞组为 0、高等级发现为 0、输入哈希未变化时才允许切换。"
+                "只有确定碰撞组为 0、高等级发现为 0、不确定键为 0、"
+                "输入哈希未变化时才允许切换。"
             ),
             "acceptance": (
                 "复跑命令退出码为 0；manifest.json 校验通过；"
-                "碰撞组 0；所有必需键非空。"
+                "确定碰撞组 0；不确定键 0；所有必需键非空。"
             ),
             "evidence": ["manifest.json", "report.html"],
         },
@@ -226,8 +312,14 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
         "gate": {
             "fail_on": "high",
             "blocking_findings": high,
-            "collision_groups": summary["collision_groups"],
-            "passes": high == 0 and summary["collision_groups"] == 0,
+            "collision_groups": summary["determinate_collision_groups"],
+            "uncertain_collision_groups": summary["uncertain_collision_groups"],
+            "uncertain_keys": uncertain_keys,
+            "passes": (
+                high == 0
+                and summary["determinate_collision_groups"] == 0
+                and uncertain_keys == 0
+            ),
         },
         "summary": {
             "source_count": summary["source_count"],
@@ -236,12 +328,18 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
             "keys_evaluated": summary["keys_evaluated"],
             "non_null_keys": summary["non_null_keys"],
             "changed_keys": summary["changed_keys"],
+            "determinate_keys": summary["determinate_keys"],
+            "uncertain_keys": uncertain_keys,
             "findings_by_severity": {
                 severity: summary["findings_by_severity"].get(severity, 0)
                 for severity in SEVERITIES
             },
             "collision_groups": summary["collision_groups"],
             "collision_records": summary["collision_records"],
+            "determinate_collision_groups": summary["determinate_collision_groups"],
+            "determinate_collision_records": summary["determinate_collision_records"],
+            "uncertain_collision_groups": summary["uncertain_collision_groups"],
+            "uncertain_collision_records": summary["uncertain_collision_records"],
             "overlength_keys": summary["overlength_keys"],
         },
         "source_fingerprints": [
@@ -252,10 +350,15 @@ def build_plan(result: "ScanResult") -> dict[str, Any]:
                 "sha256": source["sha256"],
                 "size_bytes": source["size_bytes"],
                 "encoding": source["encoding"],
+                "encoding_errors": source["encoding_errors"],
+                "invalid_byte_policy": source["invalid_byte_policy"],
                 "records": source["records"],
+                "contamination": source["contamination"],
                 "status": (
                     "blocked"
                     if source["findings_by_severity"].get("high", 0)
+                    else "uncertain"
+                    if source["contamination"]["scope"] != "none"
                     else "review"
                     if source["findings_by_severity"].get("medium", 0)
                     else "ready"

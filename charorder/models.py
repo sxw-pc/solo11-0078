@@ -23,6 +23,9 @@ DEFAULT_SEVERITIES: dict[str, str] = {
     "CONTROL_CHARACTER": "high",
     "BIDI_CONTROL": "high",
     "REPLACEMENT_CHARACTER": "high",
+    "LITERAL_REPLACEMENT_CHARACTER": "medium",
+    "UNCERTAIN_DECODED_KEY": "medium",
+    "UNCERTAIN_COLLISION": "medium",
     "SURROGATE_CHARACTER": "high",
     "MOJIBAKE_SUSPECT": "medium",
     "NON_TEXT_VALUE": "medium",
@@ -48,6 +51,9 @@ CHECK_LABELS: dict[str, str] = {
     "CONTROL_CHARACTER": "控制字符",
     "BIDI_CONTROL": "双向文本控制符",
     "REPLACEMENT_CHARACTER": "替换字符 U+FFFD",
+    "LITERAL_REPLACEMENT_CHARACTER": "原数据中的合法替换字符",
+    "UNCERTAIN_DECODED_KEY": "目标键含解码替换字符（不确定）",
+    "UNCERTAIN_COLLISION": "含不确定成员的碰撞组（不作确定仲裁）",
     "SURROGATE_CHARACTER": "孤立代理码位",
     "MOJIBAKE_SUSPECT": "疑似乱码",
     "NON_TEXT_VALUE": "非文本值被强制转写",
@@ -85,6 +91,7 @@ class SourceSpec:
     delimiter: str = ","
     quotechar: str = '"'
     table: str | None = None
+    invalid_byte_policy: str = "field"
 
 
 @dataclass(frozen=True)
@@ -175,6 +182,14 @@ class SourceRecord:
     record_id: str | None
     values: dict[str, Any]
     defects: list[Defect] = field(default_factory=list)
+    # Fields whose text contains U+FFFD inserted by the decoder (not the file).
+    contaminated_columns: set[str] = field(default_factory=set)
+    # U+FFFD counts per field: inserted-by-decoder vs. literal in the source.
+    # ``None`` means the split was widened and cannot be known per field.
+    contamination_origins: dict[str, dict[str, int | None]] = field(
+        default_factory=dict
+    )
+    contamination_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -195,6 +210,15 @@ class SourceLoad:
     size_bytes: int
     issues: list[Defect] = field(default_factory=list)
     decode_note: dict[str, Any] | None = None
+    # Columns known to carry decoder-inserted U+FFFD at source level. When the
+    # configured policy or format cannot locate the damage precisely, this
+    # deliberately widens to every record/field in the source (whole_source).
+    contaminated_columns: set[str] = field(default_factory=set)
+    contamination_scope: str = "none"  # none | field | record | whole_source
+    contamination_reasons: list[str] = field(default_factory=list)
+    invalid_byte_offsets: list[dict[str, Any]] = field(default_factory=list)
+    # 1:1 with records, in order: which fields of that record are contaminated.
+    record_contamination: list[set[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -244,6 +268,16 @@ class KeyResult:
     changed: bool
     defects: list[Defect] = field(default_factory=list)
     collision_group_id: str | None = None
+    # Evidence confidence. A key built from a field that the decoder repaired
+    # with U+FFFD is not real source value evidence and must never be treated
+    # as a determinate collision participant or migration step.
+    uncertainty: str = "determinate"  # determinate | uncertain
+    uncertain_columns: tuple[str, ...] = ()
+    uncertainty_reasons: tuple[str, ...] = ()
+
+    @property
+    def determinate(self) -> bool:
+        return self.uncertainty == "determinate"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -260,6 +294,9 @@ class KeyResult:
             "key_bytes": self.key_bytes,
             "key_chars": self.key_chars,
             "changed": self.changed,
+            "uncertainty": self.uncertainty,
+            "uncertain_columns": list(self.uncertain_columns),
+            "uncertainty_reasons": list(self.uncertainty_reasons),
             "defects": [
                 {"code": d.code, "severity": d.severity, "column": d.column}
                 for d in self.defects
@@ -278,6 +315,15 @@ class CollisionGroup:
     reason_code: str
     participants: list[KeyResult]
     raw_variants: list[str]
+    # A group that contains any decoder-contaminated participant is unresolved
+    # evidence: it must not be presented as a determinate arbitration target.
+    uncertainty: str = "determinate"  # determinate | uncertain
+    uncertain_participants: int = 0
+    uncertainty_reasons: list[str] = field(default_factory=list)
+
+    @property
+    def determinate(self) -> bool:
+        return self.uncertainty == "determinate"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -287,6 +333,9 @@ class CollisionGroup:
             "target_key": self.target_key,
             "target_key_escaped": self.target_key_escaped,
             "reason_code": self.reason_code,
+            "uncertainty": self.uncertainty,
+            "uncertain_participants": self.uncertain_participants,
+            "uncertainty_reasons": self.uncertainty_reasons,
             "record_count": len(self.participants),
             "distinct_raw_count": len(self.raw_variants),
             "participants": [
@@ -296,6 +345,7 @@ class CollisionGroup:
                     "record_id": k.record_id,
                     "raw_values": list(k.raw_values),
                     "raw_display": k.raw_display,
+                    "uncertainty": k.uncertainty,
                 }
                 for k in self.participants
             ],

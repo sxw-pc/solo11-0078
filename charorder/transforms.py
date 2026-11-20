@@ -115,8 +115,18 @@ def has_unit_separator(value: str) -> bool:
     return UNIT_SEPARATOR in value
 
 
-def analyze_text(value: str, column: str | None = None) -> list[TextIssue]:
-    """Inspect a raw text value without altering it."""
+def analyze_text(
+    value: str,
+    column: str | None = None,
+    *,
+    inserted_replacements: int | None = None,
+) -> list[TextIssue]:
+    """Inspect a raw text value without altering it.
+
+    ``inserted_replacements`` is the number of U+FFFD characters the decoder
+    inserted for illegal bytes.  When known, it separates them from legal
+    U+FFFD characters that were already present in the source text.
+    """
 
     issues: list[TextIssue] = []
 
@@ -178,14 +188,47 @@ def analyze_text(value: str, column: str | None = None) -> list[TextIssue]:
 
     replacement_count = value.count("�")
     if replacement_count:
-        issues.append(
-            TextIssue(
-                code="REPLACEMENT_CHARACTER",
-                message=f"发现 {replacement_count} 个 U+FFFD 替换字符，可能来自解码失败",
-                details={"count": replacement_count},
-                column=column,
+        if inserted_replacements is None:
+            # Provenance unknown (e.g. a direct call): report generically.
+            issues.append(
+                TextIssue(
+                    code="REPLACEMENT_CHARACTER",
+                    message=f"发现 {replacement_count} 个 U+FFFD 替换字符，可能来自解码失败",
+                    details={"count": replacement_count, "origin": "unknown"},
+                    column=column,
+                )
             )
-        )
+        else:
+            inserted = min(replacement_count, max(0, inserted_replacements))
+            literal = replacement_count - inserted
+            if inserted:
+                issues.append(
+                    TextIssue(
+                        code="REPLACEMENT_CHARACTER",
+                        message=(
+                            f"发现 {inserted} 个由解码器插入的 U+FFFD 替换字符，"
+                            "原字节已不可恢复"
+                        ),
+                        details={"count": inserted, "origin": "decoder"},
+                        column=column,
+                    )
+                )
+            if literal:
+                issues.append(
+                    TextIssue(
+                        code="LITERAL_REPLACEMENT_CHARACTER",
+                        message=(
+                            f"发现 {literal} 个原数据中合法存在的 U+FFFD，"
+                            "并非解码失败，不改变键的确定性"
+                        ),
+                        details={
+                            "count": literal,
+                            "origin": "literal",
+                            "decoder_inserted": inserted,
+                        },
+                        column=column,
+                    )
+                )
 
     mojibake = _MOJIBAKE_RE.search(value)
     if mojibake:

@@ -74,7 +74,13 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             key_result_count INTEGER NOT NULL,
             source_finding_count INTEGER NOT NULL,
             columns_json TEXT NOT NULL,
-            decode_note_json TEXT NOT NULL
+            decode_note_json TEXT NOT NULL,
+            encoding_errors TEXT NOT NULL,
+            invalid_byte_policy TEXT NOT NULL,
+            contamination_scope TEXT NOT NULL,
+            contaminated_columns_json TEXT NOT NULL,
+            contaminated_records INTEGER NOT NULL,
+            contamination_reasons_json TEXT NOT NULL
         );
         CREATE TABLE rules (
             rule_id TEXT PRIMARY KEY,
@@ -96,6 +102,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             ordinal INTEGER NOT NULL,
             record_ref TEXT NOT NULL,
             record_id TEXT,
+            contaminated_columns_json TEXT NOT NULL,
+            contamination_reasons_json TEXT NOT NULL,
             UNIQUE (source_id, record_ref)
         );
         CREATE TABLE key_results (
@@ -115,7 +123,10 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             key_chars INTEGER NOT NULL,
             changed INTEGER NOT NULL,
             collision_group_id TEXT,
-            defects_json TEXT NOT NULL
+            defects_json TEXT NOT NULL,
+            uncertainty TEXT NOT NULL,
+            uncertain_columns_json TEXT NOT NULL,
+            uncertainty_reasons_json TEXT NOT NULL
         );
         CREATE TABLE findings (
             finding_id TEXT PRIMARY KEY,
@@ -140,13 +151,17 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             reason_code TEXT NOT NULL,
             record_count INTEGER NOT NULL,
             distinct_raw_count INTEGER NOT NULL,
-            raw_variants_json TEXT NOT NULL
+            raw_variants_json TEXT NOT NULL,
+            uncertainty TEXT NOT NULL,
+            uncertain_participants INTEGER NOT NULL,
+            uncertainty_reasons_json TEXT NOT NULL
         );
         CREATE TABLE collision_members (
             group_id TEXT NOT NULL,
             key_result_id TEXT NOT NULL,
             record_ref TEXT NOT NULL,
             record_id TEXT,
+            uncertainty TEXT NOT NULL,
             PRIMARY KEY (group_id, key_result_id)
         );
         CREATE INDEX ix_key_results_rule ON key_results (rule_id, target_key);
@@ -214,13 +229,17 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
 
     for load in result.source_loads:
         stats = source_summary[load.spec.id]
+        contamination = stats["contamination"]
         connection.execute(
             """
             INSERT INTO sources (
                 source_id, kind, path, sha256, size_bytes, encoding,
                 record_count, key_result_count, source_finding_count,
-                columns_json, decode_note_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                columns_json, decode_note_json, encoding_errors,
+                invalid_byte_policy, contamination_scope,
+                contaminated_columns_json, contaminated_records,
+                contamination_reasons_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 load.spec.id,
@@ -234,6 +253,12 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 stats["source_findings"],
                 _json(list(load.columns)),
                 _json(load.decode_note or {}),
+                load.spec.encoding_errors,
+                load.spec.invalid_byte_policy,
+                contamination["scope"],
+                _json(contamination["columns"]),
+                contamination["records"],
+                _json(contamination["reasons"]),
             ),
         )
 
@@ -264,8 +289,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
     connection.executemany(
         """
         INSERT INTO records (
-            record_pk, run_id, source_id, ordinal, record_ref, record_id
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            record_pk, run_id, source_id, ordinal, record_ref, record_id,
+            contaminated_columns_json, contamination_reasons_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -275,6 +301,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 record.ordinal,
                 record.record_ref,
                 record.record_id,
+                _json(sorted(record.contaminated_columns)),
+                _json(record.contamination_reasons),
             )
             for record in result.records
         ],
@@ -286,8 +314,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
             key_result_id, run_id, source_id, rule_id, ordinal, record_ref,
             record_id, raw_values_json, raw_display, target_key,
             target_key_escaped, key_sha256, key_bytes, key_chars, changed,
-            collision_group_id, defects_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            collision_group_id, defects_json, uncertainty, uncertain_columns_json,
+            uncertainty_reasons_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -319,6 +348,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                         for defect in item.defects
                     ]
                 ),
+                item.uncertainty,
+                _json(list(item.uncertain_columns)),
+                _json(list(item.uncertainty_reasons)),
             )
             for item in result.key_results
         ],
@@ -353,8 +385,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
         """
         INSERT INTO collisions (
             group_id, run_id, rule_id, source_id, target_key, target_key_escaped,
-            reason_code, record_count, distinct_raw_count, raw_variants_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            reason_code, record_count, distinct_raw_count, raw_variants_json,
+            uncertainty, uncertain_participants, uncertainty_reasons_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -368,6 +401,9 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 len(group.participants),
                 len(group.raw_variants),
                 _json(group.raw_variants),
+                group.uncertainty,
+                group.uncertain_participants,
+                _json(group.uncertainty_reasons),
             )
             for group in result.collisions
         ],
@@ -375,8 +411,8 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
     connection.executemany(
         """
         INSERT INTO collision_members (
-            group_id, key_result_id, record_ref, record_id
-        ) VALUES (?, ?, ?, ?)
+            group_id, key_result_id, record_ref, record_id, uncertainty
+        ) VALUES (?, ?, ?, ?, ?)
         """,
         [
             (
@@ -384,6 +420,7 @@ def _insert_all(connection: sqlite3.Connection, result: ScanResult) -> None:
                 participant.key_result_id,
                 participant.record_ref,
                 participant.record_id,
+                participant.uncertainty,
             )
             for group in result.collisions
             for participant in group.participants

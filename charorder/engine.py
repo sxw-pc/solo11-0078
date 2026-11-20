@@ -35,6 +35,8 @@ from .transforms import (
     utf8_bytes,
 )
 
+REPLACEMENT_CHARACTER = "�"
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -164,13 +166,85 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
     ]
     key_results: list[KeyResult] = []
     rule_lookup = config.key_map
-    loads_by_source = {load.spec.id: load for load in source_loads}
+    contaminated_by_source = {
+        load.spec.id: (
+            load.contamination_scope,
+            list(load.contamination_reasons),
+        )
+        for load in source_loads
+    }
 
     for load in source_loads:
         source_rules = [rule for rule in config.keys if rule.source_id == load.spec.id]
+        scope, source_reasons = contaminated_by_source[load.spec.id]
         for record in load.records:
+            record_reasons = list(record.contamination_reasons)
+            has_visible_fffd = any(
+                isinstance(value, str) and REPLACEMENT_CHARACTER in value
+                for value in record.values.values()
+            )
+            if record.contaminated_columns and scope == "field":
+                for column in sorted(record.contaminated_columns):
+                    origin = record.contamination_origins.get(column) or {}
+                    add_finding(
+                        "REPLACEMENT_CHARACTER",
+                        (
+                            f"列 {column} 含解码器插入的 U+FFFD；"
+                            "依赖该列的键按不确定处理"
+                        ),
+                        source_id=load.spec.id,
+                        record_ref=record.record_ref,
+                        record_id=record.record_id,
+                        column=column,
+                        details={
+                            "record_ref": record.record_ref,
+                            "column": column,
+                            "decoder_inserted": origin.get("inserted"),
+                            "literal": origin.get("literal"),
+                            "scope": scope,
+                        },
+                    )
+            elif record.contaminated_columns and (
+                record_reasons or has_visible_fffd
+            ):
+                # The precise field could not be proven; record the damaged
+                # evidence explicitly instead of leaving it implicit in keys.
+                inserted_values = [
+                    origin.get("inserted")
+                    for origin in record.contamination_origins.values()
+                ]
+                inserted_total = (
+                    None
+                    if any(value is None for value in inserted_values)
+                    else sum(inserted_values)  # type: ignore[arg-type]
+                )
+                add_finding(
+                    "REPLACEMENT_CHARACTER",
+                    (
+                        f"记录 {record.record_ref} 的字段含解码器插入的 U+FFFD；"
+                        "涉及字段的键按不确定处理"
+                    ),
+                    source_id=load.spec.id,
+                    record_ref=record.record_ref,
+                    record_id=record.record_id,
+                    details={
+                        "record_ref": record.record_ref,
+                        "columns": sorted(record.contaminated_columns),
+                        "decoder_inserted": inserted_total,
+                        "scope": scope,
+                        "reasons": record_reasons or source_reasons,
+                    },
+                )
             for rule in source_rules:
-                result = _evaluate_key(config, run_id, rule, record)
+                result = _evaluate_key(
+                    config,
+                    run_id,
+                    rule,
+                    record,
+                    scope=scope,
+                    source_reasons=source_reasons,
+                    record_reasons=record_reasons,
+                )
                 key_results.append(result)
                 for defect in result.defects:
                     add_finding(
@@ -216,57 +290,92 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
             continue
         participants.sort(key=lambda item: item.ordinal)
         rule = rule_lookup[rule_id]
-        raw_variants_set: set[tuple[str | None, ...]] = {
-            tuple(participant.raw_values) for participant in participants
+        determinate = [item for item in participants if item.determinate]
+        uncertain = [item for item in participants if not item.determinate]
+
+        if uncertain and len(determinate) >= 2:
+            # Two or more clean records are a real collision on their own.  Emit
+            # that determinate sub-group, then keep the repaired participants in
+            # a separate uncertain group so they can never bolster or dilute it.
+            collisions.append(
+                _make_determinate_group(
+                    config, add_finding, run_id, rule, determinate, target_key
+                )
+            )
+        elif uncertain:
+            # Only one clean participant: it cannot collide with itself.  Any
+            # repaired look-alike stays entirely in the uncertain group.
+            pass
+        else:
+            collisions.append(
+                _make_determinate_group(
+                    config, add_finding, run_id, rule, participants, target_key
+                )
+            )
+        if not uncertain:
+            continue
+        group_id = _collision_id(run_id, rule_id, target_key, uncertain=True)
+        uncertain_raw_variants = {
+            format_raw_values(participant.raw_values)
+            for participant in uncertain
         }
-        reason = (
-            "NORMALIZATION_COLLISION"
-            if len(raw_variants_set) > 1
-            else "DUPLICATE_KEY"
-        )
-        group_id = _collision_id(run_id, rule_id, target_key)
-        for participant in participants:
-            participant.collision_group_id = group_id
         group = CollisionGroup(
             group_id=group_id,
             rule_id=rule_id,
             source_id=rule.source_id,
             target_key=sanitize_text(target_key),
             target_key_escaped=escaped_text(sanitize_text(target_key)),
-            reason_code=reason,
-            participants=participants,
-            raw_variants=sorted(
+            reason_code="UNCERTAIN_COLLISION",
+            participants=uncertain,
+            raw_variants=sorted(uncertain_raw_variants),
+            uncertainty="uncertain",
+            uncertain_participants=len(uncertain),
+            uncertainty_reasons=sorted(
                 {
-                    format_raw_values(participant.raw_values)
-                    for participant in participants
+                    reason
+                    for participant in uncertain
+                    for reason in participant.uncertainty_reasons
                 }
             ),
         )
+        for participant in uncertain:
+            participant.collision_group_id = group_id
         collisions.append(group)
         add_finding(
-            reason,
+            "UNCERTAIN_COLLISION",
             (
-                f"唯一键 {rule_id} 有 {len(participants)} 条记录映射到同一目标键 "
-                f"{group.target_key_escaped}，需业务仲裁后再建唯一索引"
+                f"唯一键 {rule_id} 有 {len(uncertain)} 条由解码替换字符构成的记录"
+                f"映射到目标键 {group.target_key_escaped}"
+                + (
+                    f"（该目标键另有 {len(determinate)} 条确定记录，已单独成组）"
+                    if determinate
+                    else ""
+                )
+                + "；不确定组不作仲裁对象，需先修复源字节后复跑"
             ),
             source_id=rule.source_id,
             rule_id=rule_id,
             details={
                 "group_id": group_id,
+                "uncertainty": "uncertain",
                 "target_key_sha256": sha256_text(target_key),
                 "target_key_escaped": group.target_key_escaped,
-                "record_count": len(participants),
-                "distinct_raw_count": len(raw_variants_set),
+                "record_count": len(uncertain),
+                "determinate_record_count": len(determinate),
+                "uncertain_record_count": len(uncertain),
+                "distinct_raw_count": len(uncertain_raw_variants),
+                "uncertainty_reasons": group.uncertainty_reasons,
                 "sample_participants": [
                     {
                         "record_ref": participant.record_ref,
                         "record_id": participant.record_id,
                         "raw_display": participant.raw_display,
+                        "uncertainty": participant.uncertainty,
                     }
-                    for participant in participants[:20]
+                    for participant in uncertain[:20]
                 ],
             },
-            severity=config.severity_for(reason),
+            severity=config.severity_for("UNCERTAIN_COLLISION"),
         )
 
     findings.sort(
@@ -306,12 +415,86 @@ def scan(config: AppConfig, source_loads: list[SourceLoad]) -> ScanResult:
     return result
 
 
+def _make_determinate_group(
+    config: AppConfig,
+    add_finding,
+    run_id: str,
+    rule: KeyRule,
+    participants: list[KeyResult],
+    target_key: str,
+) -> CollisionGroup:
+    participants.sort(key=lambda item: item.ordinal)
+    raw_variants_set: set[tuple[str | None, ...]] = {
+        tuple(participant.raw_values) for participant in participants
+    }
+    reason = (
+        "NORMALIZATION_COLLISION"
+        if len(raw_variants_set) > 1
+        else "DUPLICATE_KEY"
+    )
+    group_id = _collision_id(run_id, rule.id, target_key)
+    for participant in participants:
+        participant.collision_group_id = group_id
+    group = CollisionGroup(
+        group_id=group_id,
+        rule_id=rule.id,
+        source_id=rule.source_id,
+        target_key=sanitize_text(target_key),
+        target_key_escaped=escaped_text(sanitize_text(target_key)),
+        reason_code=reason,
+        participants=participants,
+        raw_variants=sorted(
+            {
+                format_raw_values(participant.raw_values)
+                for participant in participants
+            }
+        ),
+        uncertainty="determinate",
+    )
+    add_finding(
+        reason,
+        (
+            f"唯一键 {rule.id} 有 {len(participants)} 条记录映射到同一目标键 "
+            f"{group.target_key_escaped}，需业务仲裁后再建唯一索引"
+        ),
+        source_id=rule.source_id,
+        rule_id=rule.id,
+        details={
+            "group_id": group_id,
+            "uncertainty": "determinate",
+            "target_key_sha256": sha256_text(target_key),
+            "target_key_escaped": group.target_key_escaped,
+            "record_count": len(participants),
+            "distinct_raw_count": len(raw_variants_set),
+            "sample_participants": [
+                {
+                    "record_ref": participant.record_ref,
+                    "record_id": participant.record_id,
+                    "raw_display": participant.raw_display,
+                }
+                for participant in participants[:20]
+            ],
+        },
+        severity=config.severity_for(reason),
+    )
+    return group
+
+
 def _evaluate_key(
-    config: AppConfig, run_id: str, rule: KeyRule, record: SourceRecord
+    config: AppConfig,
+    run_id: str,
+    rule: KeyRule,
+    record: SourceRecord,
+    *,
+    scope: str = "none",
+    source_reasons: list[str] | None = None,
+    record_reasons: list[str] | None = None,
 ) -> KeyResult:
     defects: list[Defect] = []
     raw_components: list[str | None] = []
     missing_columns: list[str] = []
+    record_reasons = record_reasons or []
+    record_contaminated = set(record.contaminated_columns)
 
     for column in rule.columns:
         raw = record.values.get(column)
@@ -320,16 +503,59 @@ def _evaluate_key(
         raw_str = None if raw is None else str(raw)
         raw_components.append(raw_str)
         if raw_str is not None:
-            for issue in analyze_text(raw_str, column=column):
+            origin = record.contamination_origins.get(column)
+            # ``None`` (origin recorded with unknown counts after a scope
+            # widening) must stay unknown; ``0`` would mislabel decoder
+            # insertions as legal source characters.
+            if origin is None:
+                inserted_known: int | None = 0
+                literal_known: int | None = 0
+            else:
+                inserted_known = origin.get("inserted")
+                literal_known = origin.get("literal")
+            for issue in analyze_text(
+                raw_str, column=column, inserted_replacements=inserted_known
+            ):
+                details = dict(issue.details)
+                if issue.code == "LITERAL_REPLACEMENT_CHARACTER":
+                    if literal_known is None:
+                        # Provenance was widened: the split between legal and
+                        # decoder-inserted U+FFFD is unknown for this field.
+                        details["origin"] = "unknown"
+                        details["provenance"] = "widened"
+                    else:
+                        details.setdefault("literal_count", literal_known)
                 defects.append(
                     Defect(
                         code=issue.code,
                         severity=config.severity_for(issue.code),
                         message=issue.message,
-                        details=issue.details,
+                        details=details,
                         column=issue.column,
                     )
                 )
+
+    # Propagate decode provenance to the key.  A component is uncertain when
+    # either this record/field was hit precisely, or the whole source was
+    # widened because the location could not be proven.
+    uncertain_columns: list[str] = []
+    uncertainty_reasons: list[str] = []
+    for column in rule.columns:
+        if column in record_contaminated:
+            uncertain_columns.append(column)
+        elif scope == "whole_source":
+            # The source-level scope covers every field, including columns
+            # that carry no visible U+FFFD in this particular record.
+            uncertain_columns.append(column)
+    if uncertain_columns:
+        if scope == "whole_source":
+            uncertainty_reasons.append("源级污染范围不可精确到字段，整源键证据按不确定处理")
+        else:
+            uncertainty_reasons.append("键分量含解码器插入的 U+FFFD，目标键不是真实源值")
+        uncertainty_reasons.extend(source_reasons or [])
+        uncertainty_reasons.extend(record_reasons)
+    uncertainty_reasons = list(dict.fromkeys(uncertainty_reasons))
+    uncertainty = "uncertain" if uncertain_columns else "determinate"
 
     if missing_columns:
         if rule.required:
@@ -419,6 +645,22 @@ def _evaluate_key(
     safe_raw_values = tuple(
         None if value is None else sanitize_text(value) for value in raw_components
     )
+    if uncertainty == "uncertain":
+        defects.append(
+            Defect(
+                code="UNCERTAIN_DECODED_KEY",
+                severity=config.severity_for("UNCERTAIN_DECODED_KEY"),
+                message=(
+                    f"目标键 {rule.id} 的字段含解码替换字符，"
+                    "该键不作为确定迁移证据"
+                ),
+                details={
+                    "columns": uncertain_columns,
+                    "uncertainty_reasons": uncertainty_reasons,
+                },
+                column=uncertain_columns[0] if len(uncertain_columns) == 1 else None,
+            )
+        )
     return KeyResult(
         key_result_id=_key_result_id(
             run_id, rule.source_id, rule.id, record.record_ref
@@ -437,6 +679,9 @@ def _evaluate_key(
         key_chars=key_chars,
         changed=changed,
         defects=defects,
+        uncertainty=uncertainty,
+        uncertain_columns=tuple(uncertain_columns),
+        uncertainty_reasons=tuple(uncertainty_reasons),
     )
 
 
@@ -464,12 +709,21 @@ def _summarize(
     code_counts = Counter(finding.code for finding in findings)
     source_order = {source.id: index for index, source in enumerate(config.sources)}
 
+    determinate_collisions = [group for group in collisions if group.determinate]
+    uncertain_collisions = [group for group in collisions if not group.determinate]
+
     rule_summaries: list[dict[str, Any]] = []
     for rule in config.keys:
         related_results = [result for result in results if result.rule_id == rule.id]
         related_findings = [finding for finding in findings if finding.rule_id == rule.id]
         rule_collisions = [
             collision for collision in collisions if collision.rule_id == rule.id
+        ]
+        determinate_results = [
+            result for result in related_results if result.determinate
+        ]
+        uncertain_results = [
+            result for result in related_results if not result.determinate
         ]
         rule_severity = Counter(finding.severity for finding in related_findings)
         rule_summaries.append(
@@ -482,9 +736,23 @@ def _summarize(
                     1 for result in related_results if result.target_key is not None
                 ),
                 "changed_keys": sum(1 for result in related_results if result.changed),
-                "collision_groups": len(rule_collisions),
+                "determinate_keys": len(determinate_results),
+                "uncertain_keys": len(uncertain_results),
+                "collision_groups": len(
+                    [group for group in rule_collisions if group.determinate]
+                ),
                 "collision_records": sum(
-                    len(collision.participants) for collision in rule_collisions
+                    len(collision.participants)
+                    for collision in rule_collisions
+                    if collision.determinate
+                ),
+                "uncertain_collision_groups": len(
+                    [group for group in rule_collisions if not group.determinate]
+                ),
+                "uncertain_collision_records": sum(
+                    len(collision.participants)
+                    for collision in rule_collisions
+                    if not collision.determinate
                 ),
                 "overlength": sum(
                     1
@@ -517,6 +785,13 @@ def _summarize(
             for finding in findings
             if finding.source_id == load.spec.id
         )
+        contaminated_columns = sorted(load.contaminated_columns)
+        contaminated_records = sum(
+            1 for record in load.records if record.contaminated_columns
+        )
+        has_contamination = (
+            load.contamination_scope != "none" or bool(load.contamination_reasons)
+        )
         source_summaries.append(
             {
                 "source_id": load.spec.id,
@@ -525,9 +800,24 @@ def _summarize(
                 "sha256": load.sha256,
                 "size_bytes": load.size_bytes,
                 "encoding": load.spec.encoding,
+                "encoding_errors": load.spec.encoding_errors,
+                "invalid_byte_policy": load.spec.invalid_byte_policy,
                 "records": len(load.records),
                 "columns": list(load.columns),
+                "contamination": {
+                    "scope": load.contamination_scope,
+                    "columns": contaminated_columns,
+                    "records": contaminated_records,
+                    "reasons": list(load.contamination_reasons),
+                    "has_contamination": has_contamination,
+                },
                 "key_results": len(source_results),
+                "determinate_keys": sum(
+                    1 for result in source_results if result.determinate
+                ),
+                "uncertain_keys": sum(
+                    1 for result in source_results if not result.determinate
+                ),
                 "source_findings": len(source_findings),
                 "findings": sum(
                     1
@@ -550,6 +840,8 @@ def _summarize(
         "keys_evaluated": len(results),
         "non_null_keys": sum(1 for result in results if result.target_key is not None),
         "changed_keys": sum(1 for result in results if result.changed),
+        "determinate_keys": sum(1 for result in results if result.determinate),
+        "uncertain_keys": sum(1 for result in results if not result.determinate),
         "findings_total": len(findings),
         "findings_by_severity": {
             severity: severity_counts.get(severity, 0) for severity in SEVERITIES
@@ -557,6 +849,19 @@ def _summarize(
         "findings_by_code": dict(sorted(code_counts.items())),
         "collision_groups": len(collisions),
         "collision_records": sum(len(group.participants) for group in collisions),
+        "determinate_collision_groups": len(determinate_collisions),
+        "determinate_collision_records": sum(
+            len(group.participants) for group in determinate_collisions
+        ),
+        "uncertain_collision_groups": len(uncertain_collisions),
+        "uncertain_collision_records": sum(
+            len(group.participants) for group in uncertain_collisions
+        ),
+        "contaminated_sources": [
+            item["source_id"]
+            for item in source_summaries
+            if item["contamination"]["scope"] != "none"
+        ],
         "overlength_keys": sum(
             1
             for result in results
@@ -620,9 +925,12 @@ def _key_result_id(
     return "K-" + digest[:16]
 
 
-def _collision_id(run_id: str, rule_id: str, target_key: str) -> str:
+def _collision_id(
+    run_id: str, rule_id: str, target_key: str, *, uncertain: bool = False
+) -> str:
     digest = hashlib.sha256(
         b"collision|"
+        + (b"uncertain|" if uncertain else b"determinate|")
         + run_id.encode("ascii")
         + b"|"
         + rule_id.encode("utf-8")

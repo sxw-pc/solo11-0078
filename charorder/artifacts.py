@@ -73,6 +73,10 @@ def write_artifacts(
         "counts": {
             "groups": len(result.collisions),
             "records": sum(len(group.participants) for group in result.collisions),
+            "determinate_groups": result.summary["determinate_collision_groups"],
+            "determinate_records": result.summary["determinate_collision_records"],
+            "uncertain_groups": result.summary["uncertain_collision_groups"],
+            "uncertain_records": result.summary["uncertain_collision_records"],
         },
         "collisions": [group.to_dict() for group in result.collisions],
     }
@@ -122,6 +126,25 @@ def write_artifacts(
         "summary": result.summary,
         "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
         "source_fingerprints": result.plan["source_fingerprints"],
+        "contamination": [
+            {
+                "source_id": source["source_id"],
+                "sha256": source["sha256"],
+                **source["contamination"],
+            }
+            for source in result.summary["sources"]
+        ],
+        "uncertainty": {
+            "determinate_keys": result.summary["determinate_keys"],
+            "uncertain_keys": result.summary["uncertain_keys"],
+            "determinate_collision_groups": result.summary[
+                "determinate_collision_groups"
+            ],
+            "uncertain_collision_groups": result.summary[
+                "uncertain_collision_groups"
+            ],
+            "gate_passes": result.plan["gate"]["passes"],
+        },
         "artifacts": artifact_records,
         "ledger": {
             "path": "ledger.sqlite",

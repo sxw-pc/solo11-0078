@@ -89,7 +89,7 @@ charorder/
 │   └── cli.py                 # 命令行入口
 ├── fixtures/demo/             # 合成客户 / 商品 / 联系人数据
 ├── tools/build_demo_fixtures.py
-├── tests/                     # 87 个 unittest 用例
+├── tests/                     # 112 个 unittest 用例
 ├── pyproject.toml
 └── out/                       # demo 运行产物（可重建）
 ```
@@ -186,9 +186,10 @@ charorder/
 - 路径相对配置文件所在目录解析，也支持绝对路径；路径必须指向现有普通文件。
 - `record_id_field`：CSV 列名、JSONL 顶层字段名、SQLite 列名。缺失时仍保留记录并按行号审计，同时产生 `MISSING_RECORD_ID`。
 - `encoding_errors`：`replace`（默认，替代为 `U+FFFD` 后继续）或 `strict`（遇到非法字节直接报错退出）。
+- `invalid_byte_policy`：`field`（默认）或 `whole_source`，控制替换字符的污染范围，见第 6.2 节。
 - CSV 支持 `delimiter` / `quotechar`；JSONL 每行必须是顶层 JSON 对象。
 - SQLite 只读打开：URI `mode=ro` + `PRAGMA query_only=ON`，只查询规则引用的列；`TEXT` 按 UTF-8 解码。
-- 工具不写回任何源文件；源文件 SHA-256 会写入计划与台账。
+- 工具不写回任何源文件；源文件 SHA-256 会在解码前对原始字节计算，并写入计划与台账。
 
 ### 5.3 目标键
 
@@ -268,6 +269,32 @@ WHERE m.group_id = 'C-...';
 
 台账中的 `finding_counts` 与 `collision_summary` 是只读视图。
 
+### 6.2 替换解码的可信度与“不确定”状态
+
+启用 `encoding_errors=replace` 时，非法字节被替换成 `U+FFFD`，预检仍会生成键与碰撞，但**替换字符构成的目标键不是真实源值**。工具以显式的“不确定（uncertain）”状态隔离这类证据：
+
+- **来源可复核**：每个源的 `decode_note` / `invalid_byte_offsets` 记录每个非法字节序列的字节区间、原因、替换字符数，以及它能否映射到字符偏移；`sources.contamination_scope`、`contaminated_columns_json`、`contamination_reasons_json` 记录污染范围与原因。
+- **两种安全路线**（配置 `invalid_byte_policy`）：
+  - `field`：仅对可证明字节→字符映射的编码（UTF-8 / UTF-8-SIG）和格式（CSV / JSONL）精确定位到字段，只污染依赖该字段的键；干净字段及其键规则保持确定证据。
+  - `whole_source`：保守地把发生替换的整个源的所有键标为不确定，无需依赖位置追踪。
+  - 当编码或结构无法可靠追踪到字段（如非 UTF-8 编码、CSV 表头受损、JSON 键名受损、跨度与标准解析器不一致）时，自动扩大为整行或整源，并在产物中写明范围与原因，绝不猜测精确位置。
+- **合法 U+FFFD**：原数据中本就存在的 `U+FFFD` 计为 `LITERAL_REPLACEMENT_CHARACTER`，不会使键失去确定性；只有解码器新插入的 `U+FFFD` 才产生 `REPLACEMENT_CHARACTER` 与 `UNCERTAIN_DECODED_KEY`。
+- **位置不靠字节偏移当字符列号**：CSV 会重建每个字段的字符跨度，正确处理引号内换行、`""` 转义与空行；JSONL 逐行用标准 `json` 解析生成值跨度，转义序列不干扰定位。
+- **不确定碰撞与迁移步骤**：若唯一键组中含不确定成员，其中干净成员（≥2 条）单独构成确定组，替换字符成员进入 `UNCERTAIN_COLLISION` 组；后者不会出现在计划的“待裁决碰撞”列表，只进入独立的“不确定碰撞组”清单。
+- **门禁与结论**：`plan.gate.uncertain_keys` 与 `plan.gate.uncertain_collision_groups` 单独计数；只要存在不确定键，`gate.passes` 必为 `false`，规则状态为 `uncertain`（或已被高等级发现阻断为 `blocked`），计划不会放行不确定键。
+- **严格解码不变**：`encoding_errors=strict` 仍在遇到非法字节时直接报错，且留有原始字节与哈希不变。
+
+相关产物字段：`keys.jsonl` 的 `uncertainty` / `uncertain_columns` / `uncertainty_reasons`；`collisions.json` 的 `uncertainty` / `uncertain_participants` / `uncertainty_reasons`；台账 `key_results.uncertainty`、`collision_members.uncertainty`、`collisions.uncertainty`、`sources.contamination_*`、`records.contaminated_columns_json`；`manifest.json` 的 `contamination` 与 `uncertainty`。`verify` 会交叉校验计划、清单、`collisions.json` 与台账中的不确定计数一致。
+
+```sql
+-- 列出所有不确定键及其字段
+SELECT rule_id, record_ref, raw_display, uncertain_columns_json, uncertainty_reasons_json
+FROM key_results WHERE uncertainty = 'uncertain';
+
+-- 确定碰撞组与不确定碰撞组分开统计
+SELECT uncertainty, reason_code, COUNT(*) FROM collisions GROUP BY 1,2;
+```
+
 ---
 
 ## 7. 检查码
@@ -285,7 +312,10 @@ WHERE m.group_id = 'C-...';
 | `ABNORMAL_WHITESPACE` | medium | NBSP、全角空格、制表符、连续空白、首尾空白、全空白 |
 | `CONTROL_CHARACTER` | high | 非空白 C0/C1 控制字符 |
 | `BIDI_CONTROL` | high | 双向文本控制符 |
-| `REPLACEMENT_CHARACTER` | high | 文本含 `U+FFFD` |
+| `REPLACEMENT_CHARACTER` | high | 文本含解码器新插入的 `U+FFFD` |
+| `LITERAL_REPLACEMENT_CHARACTER` | medium | 原数据中合法存在的 `U+FFFD`，不使键失去确定性 |
+| `UNCERTAIN_DECODED_KEY` | medium | 目标键依赖解码替换字符，标为不确定证据 |
+| `UNCERTAIN_COLLISION` | medium | 含不确定成员的碰撞组，不作确定仲裁对象 |
 | `SURROGATE_CHARACTER` | high | 孤立 UTF-16 代理码位 |
 | `MOJIBAKE_SUSPECT` | medium | UTF-8 / 拉丁编码错配的典型乱码片段，仅报告不修复 |
 | `NON_TEXT_VALUE` | medium | 数字、数组、对象等非文本值被强制转写 |
@@ -319,7 +349,9 @@ python -m charorder run --config my-config.json --out out/gate --fail-on high
 - `--fail-on low`：任何风险时退出码 `1`；
 - `--fail-on none`（默认）：发现风险也返回 `0`，仅配置 / 输入 / 输出错误返回 `2`。
 
-建议把“高等级发现为 0”和“碰撞组为 0”作为唯一索引创建前的硬门禁。
+建议把“高等级发现为 0”“确定碰撞组为 0”和“不确定键为 0”作为唯一索引创建前的硬门禁。即使源级高等级发现已经使整体结论 `blocked`，`plan.gate` 仍会单独统计不确定键和不确定碰撞组，不会把替换字符构成的仲裁对象当作确定证据放行。
+
+`--fail-on` 在存在任何 `UNCERTAIN_DECODED_KEY` / `UNCERTAIN_COLLISION`（默认中等级）时同样触发对应阈值；请以 `plan.gate.passes` 作为是否放行的权威判定。
 
 ---
 
@@ -332,6 +364,7 @@ python -m charorder run --config my-config.json --out out/gate --fail-on high
   - manifest 内所有产物的大小与 SHA-256；
   - `plan.json` 哈希与 `run_id`；
   - SQLite `integrity_check`、`user_version`、行数与汇总计数；
+  - 计划 `gate`、`collisions.json`、`manifest.json` 与台账之间的不确定键 / 不确定碰撞组计数一致；
   - HTML 为 UTF-8 自包含页面，无外部脚本 / 样式 / 图片 / `@import`；
   - manifest 声明源文件只读、无网络访问。
 - 篡改任一产物后 `verify` 会失败。
@@ -377,16 +410,18 @@ python tools/build_demo_fixtures.py
 python -m unittest discover -s tests -v
 ```
 
-87 个标准库 `unittest` 用例覆盖：
+112 个标准库 `unittest` 用例覆盖：
 
 - 宽度折叠、NFC/NFD、casefold、不可见字符策略、空白折叠与管线顺序；
 - 不可见 / 双向 / 控制 / 替换 / 代理 / 乱码 / 空白检测；
 - 配置字段、错误路径、重复 ID、未知检查码；
 - CSV BOM、非法字节替换与严格模式、JSONL 坏行续跑、SQLite 只读与元数据解码；
+- 解码来源追踪：不同非法字节合流、合法 `U+FFFD` 与解码插入区分、CSV 引号内换行 / 转义、JSONL 逐行定位、非 UTF-8 编码降级为整源、保守与精细两条路线；
+- 确定 / 不确定目标键分离、确定 / 不确定碰撞组分离、计划门禁不放行不确定键、产物与台账计数一致；
 - 大小写 / 全角 / 规范化碰撞、复合键碰撞、重复记录标识、空键、必需值缺失、超限；
 - 计划确定性、产物哈希、源文件未被修改、SQLite 台账计数与视图；
 - 自包含 HTML、无外部资源、XSS 转义；
-- CLI 退出码、`verify` 篡改检测；
+- CLI 退出码、`verify` 篡改检测与不确定状态交叉校验；
 - 只读服务器 GET/HEAD/405/404 与绑定限制。
 
 测试使用临时目录，不会修改演示 fixture。

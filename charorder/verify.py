@@ -106,6 +106,8 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
             gate = plan.get("gate")
             if not isinstance(gate, dict):
                 errors.append("plan.json 缺少 gate。")
+            else:
+                _verify_gate(plan, manifest, root, errors)
     else:
         plan = {}
 
@@ -127,6 +129,72 @@ def verify_run(run_dir: str | Path) -> dict[str, Any]:
         "ledger_integrity": ledger_summary.get("integrity_check"),
         "html_self_contained": True,
     }
+
+
+def _verify_gate(
+    plan: dict[str, Any], manifest: dict[str, Any], root: Path, errors: list[str]
+) -> None:
+    """Uncertain evidence must be consistent across every artifact."""
+
+    gate = plan["gate"]
+    summary = manifest.get("summary") or {}
+    uncertainty = manifest.get("uncertainty") or {}
+    uncertain_keys = gate.get("uncertain_keys")
+    if uncertain_keys != summary.get("uncertain_keys"):
+        errors.append("plan.gate.uncertain_keys 与 manifest 摘要不一致。")
+    if uncertain_keys != uncertainty.get("uncertain_keys"):
+        errors.append("plan.gate.uncertain_keys 与 manifest.uncertainty 不一致。")
+    if uncertain_keys and gate.get("passes"):
+        errors.append("存在不确定键时 plan.gate 不得判定为通过。")
+
+    collisions_path = root / "collisions.json"
+    if not collisions_path.is_file():
+        return
+    try:
+        collisions_doc = json.loads(collisions_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        errors.append("collisions.json 不可读或不是有效 JSON。")
+        return
+    groups = collisions_doc.get("collisions") or []
+    uncertain_groups = [
+        group for group in groups if group.get("uncertainty") == "uncertain"
+    ]
+    if len(uncertain_groups) != gate.get("uncertain_collision_groups"):
+        errors.append("plan.gate.uncertain_collision_groups 与 collisions.json 不一致。")
+    for group in uncertain_groups:
+        for participant in group.get("participants", []):
+            if participant.get("uncertainty") == "uncertain":
+                break
+        else:
+            errors.append(
+                f"碰撞组 {group.get('group_id')} 标记不确定但无不确定成员。"
+            )
+    determinate_groups = [
+        group for group in groups if group.get("uncertainty") != "uncertain"
+    ]
+    if len(determinate_groups) != gate.get("collision_groups"):
+        errors.append("plan.gate.collision_groups 与确定性碰撞组数量不一致。")
+
+    # Every uncertain key in the ledger must agree with the plan gate.
+    ledger_path = root / "ledger.sqlite"
+    if ledger_path.is_file() and uncertain_keys is not None:
+        try:
+            connection = sqlite3.connect(ledger_path.as_uri() + "?mode=ro", uri=True)
+        except sqlite3.Error:
+            return
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            actual_uncertain = connection.execute(
+                "SELECT COUNT(*) FROM key_results WHERE uncertainty = 'uncertain'"
+            ).fetchone()[0]
+            if actual_uncertain != uncertain_keys:
+                errors.append(
+                    "台账不确定键数量与 plan.gate.uncertain_keys 不一致。"
+                )
+        except sqlite3.Error:
+            errors.append("台账不确定键查询失败。")
+        finally:
+            connection.close()
 
 
 def _verify_ledger(

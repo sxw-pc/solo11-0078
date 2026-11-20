@@ -30,6 +30,7 @@ _SOURCE_FIELDS = {
     "path",
     "encoding",
     "encoding_errors",
+    "invalid_byte_policy",
     "record_id_field",
     "delimiter",
     "quotechar",
@@ -204,6 +205,22 @@ def _parse_source(item: Any, index: int, base_dir: Path) -> SourceSpec:
     if encoding_errors not in {"replace", "strict"}:
         raise ConfigError(f"{where}.encoding_errors 只能是 replace 或 strict。")
 
+    # How strictly decoder-inserted U+FFFD is traced back to fields.
+    #   field        - precise tracking where the encoding/format proves it
+    #   whole_source - always treat every key built from this source as uncertain
+    invalid_byte_policy = _optional_str(
+        obj.get("invalid_byte_policy", "field"), f"{where}.invalid_byte_policy"
+    )
+    if invalid_byte_policy not in {"field", "whole_source"}:
+        raise ConfigError(
+            f"{where}.invalid_byte_policy 只能是 field 或 whole_source。"
+        )
+    if invalid_byte_policy == "whole_source" and encoding_errors != "replace":
+        raise ConfigError(
+            f"{where}.invalid_byte_policy=whole_source 需要 encoding_errors=replace；"
+            "严格解码不会生成替换字符。"
+        )
+
     delimiter = _optional_str(obj.get("delimiter", ","), f"{where}.delimiter")
     quotechar = _optional_str(obj.get("quotechar", '"'), f"{where}.quotechar")
     if kind == "csv":
@@ -245,6 +262,7 @@ def _parse_source(item: Any, index: int, base_dir: Path) -> SourceSpec:
         delimiter=delimiter,
         quotechar=quotechar,
         table=table,
+        invalid_byte_policy=invalid_byte_policy,
     )
 
 
